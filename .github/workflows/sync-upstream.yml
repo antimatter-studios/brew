@@ -1,0 +1,89 @@
+# Weekly upstream sync for the antimatter-studios/brew fork.
+#
+# Purpose: keep this fork usable as a daily-driver brew on team machines.
+# Team machines clone the fork and track the `deployed` branch; `brew update`
+# on those machines is just a `git pull` of `deployed`. That gives us two
+# hard constraints this workflow is designed around:
+#
+#   1. History on `deployed` must only ever grow. We merge upstream into it
+#      (merge-based, never rebase/force-push) so that every client
+#      `git pull` / `brew update` is a plain fast-forward. Rewriting
+#      `deployed` would strand every machine on a diverged history.
+#
+#   2. On merge conflict the job MUST fail loudly, with no auto-resolution.
+#      A failed run pushes nothing, so machines simply stay on the previous
+#      (known-good) deployed state until a human resolves the conflict.
+#
+# Bootstrap (one-time, manual): `deployed` = origin/master + a merge of the
+# `tap-filter` feature branch, created by hand once the feature branch is
+# final. This workflow only maintains `deployed` after that; it never
+# creates it.
+#
+# Scheduled-workflow auto-disable rule: GitHub disables scheduled workflows
+# in repositories with no activity for 60 days. Every successful run of this
+# workflow pushes a merge commit to `deployed`, which counts as repository
+# activity, so successful weekly runs self-sustain the schedule. If runs
+# start failing (conflicts) AND nothing else touches the repo for 60 days,
+# GitHub will disable the schedule and it must be re-enabled manually from
+# the Actions tab.
+
+name: Sync upstream into deployed
+
+on:
+  schedule:
+    # Weekly, Monday 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history of `deployed` is required for the merge below.
+      - name: Checkout deployed
+        uses: actions/checkout@v4
+        with:
+          ref: deployed
+          fetch-depth: 0
+
+      # Fast-forward the fork's `master` from upstream Homebrew/brew.
+      # We never commit to `master` ourselves, so this always fast-forwards.
+      - name: Sync fork master from upstream
+        run: gh repo sync ${{ github.repository }} --source Homebrew/brew --branch master
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch synced master
+        run: git fetch origin master
+
+      # Merge, never rebase: `deployed` history must only grow (see header).
+      # If this merge conflicts, the step fails, nothing is pushed, and
+      # client machines stay on the previous deployed state.
+      - name: Merge master into deployed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit origin/master
+
+      - name: Push deployed
+        run: git push origin deployed
+
+      - name: Conflict instructions
+        if: failure()
+        run: |
+          echo "::error::Upstream merge into 'deployed' failed - manual resolution required."
+          echo ""
+          echo "This is almost certainly upstream touching the tap-filter feature's"
+          echo "files (Library/Homebrew/tap.rb / tapfile.rb). No machines are"
+          echo "affected: nothing was pushed, so clients stay on the previous"
+          echo "deployed state until this is resolved."
+          echo ""
+          echo "Resolve manually:"
+          echo "  git clone git@github.com:${{ github.repository }}.git && cd brew"
+          echo "  git checkout deployed"
+          echo "  git fetch origin master"
+          echo "  git merge origin/master   # resolve conflicts, keep tap-filter semantics"
+          echo "  git push origin deployed  # normal push - never force-push deployed"
