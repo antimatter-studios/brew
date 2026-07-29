@@ -954,6 +954,63 @@ RSpec.describe Tap do
     end
   end
 
+  specify "#install materialises only the paths the tap's Tapfile declares" do
+    tap = T.let(nil, T.untyped)
+    formula_file.dirname.mkpath
+    formula_file.write <<~RUBY
+      class Foo < Formula
+        url "https://brew.sh/foo-1.0.tar.gz"
+      end
+    RUBY
+    (path/"Tapfile").write "/Formula/\n"
+    (path/"docs").mkpath
+    (path/"docs/unwanted.md").write "filtered out"
+    setup_git_repo
+    setup_completion link: false
+
+    tap = described_class.fetch("NotHomebrew", "baz")
+    tap.install clone_target: homebrew_foo_tap.path/".git"
+
+    expect(tap.path/"Formula/foo.rb").to be_a_file
+    expect(tap.path/"Tapfile").to be_a_file
+    expect(tap.path/"docs/unwanted.md").not_to exist
+  ensure
+    tap.uninstall if tap&.installed?
+  end
+
+  specify "#reapply_tapfile_filter! follows a Tapfile change in the tap repository" do
+    tap = T.let(nil, T.untyped)
+    formula_file.dirname.mkpath
+    formula_file.write <<~RUBY
+      class Foo < Formula
+        url "https://brew.sh/foo-1.0.tar.gz"
+      end
+    RUBY
+    (path/"Tapfile").write "/Formula/\n"
+    (path/"docs").mkpath
+    (path/"docs/unwanted.md").write "filtered out"
+    setup_git_repo
+    setup_completion link: false
+
+    tap = described_class.fetch("NotHomebrew", "baz")
+    tap.install clone_target: homebrew_foo_tap.path/".git"
+    expect(tap.path/"docs/unwanted.md").not_to exist
+
+    # The tap widens its own filter upstream.
+    (path/"Tapfile").write "/Formula/\n/docs/\n"
+    path.cd do
+      system "git", "add", "--all"
+      system "git", "commit", "-m", "widen filter"
+    end
+    tap.git_command!(%w[fetch origin], chdir: tap.path)
+    tap.git_command!(%w[reset --hard FETCH_HEAD], chdir: tap.path)
+    tap.reapply_tapfile_filter!
+
+    expect(tap.path/"docs/unwanted.md").to be_a_file
+  ensure
+    tap.uninstall if tap&.installed?
+  end
+
   specify "#install and #uninstall" do
     setup_tap_files
     setup_git_repo

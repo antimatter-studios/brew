@@ -273,6 +273,10 @@ module Homebrew
         Commands.rebuild_commands_completion_list
         link_completions_manpages_and_docs
         Tap.installed.each(&:link_completions_and_manpages)
+        # A tap's `Tapfile` may have changed in this update, and the sparse
+        # checkout patterns are only rewritten from Ruby: the Bash update path
+        # fetches and resets taps without going through `Tap#install`.
+        Tap.installed.each(&:reapply_tapfile_filter!)
 
         # Only prewarm when the update changed `Library/Homebrew/vendor`:
         # portable Ruby bumps rotate the whole Bootsnap cache key and

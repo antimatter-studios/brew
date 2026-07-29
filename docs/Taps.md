@@ -60,6 +60,35 @@ brew tap username/foobar
 This command maps to `https://github.com/username/homebrew-foobar`.
 The two-argument form does not impose this naming convention because the full URL is explicit.
 
+## Filtering tap contents
+
+A tap repository can declare which of its paths Homebrew needs by adding a `Tapfile` to its root.
+This helps large repositories, such as a monorepo that doubles as its own tap, where a full clone would be much larger than the formulae and casks it contains.
+
+A `Tapfile` holds `gitignore`-style patterns, one per line.
+Blank lines and lines beginning with `#` are ignored.
+A leading `/` anchors a pattern to the repository root and a leading `!` negates an earlier pattern:
+
+```
+/Formula/
+!/Formula/internal/
+```
+
+Homebrew passes these patterns to Git's sparse checkout unchanged, so Git performs the matching.
+The patterns are data and are never executed, and they can only select paths within the tap itself.
+
+When a tap contains a `Tapfile`, Homebrew clones the repository without file contents and then materialises only the matching paths, so unmatched files are never downloaded.
+The `Tapfile` itself is always materialised.
+Paths added by later commits are matched automatically.
+
+A tap without a `Tapfile` is cloned and materialised in full, exactly as before.
+Filtering also needs a Git version and a server that support partial clone and sparse checkout.
+When either does not, Git falls back to a full clone.
+
+Editing a tap's `Tapfile` changes which patterns apply.
+Homebrew re-reads it during `brew update`, so an already-tapped repository follows the patterns in its current commit.
+Removing a `Tapfile` materialises the tap in full again.
+
 ## Duplicate names
 
 A tap may contain a formula with the same name as one in `homebrew/core`.

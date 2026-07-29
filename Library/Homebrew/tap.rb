@@ -614,6 +614,99 @@ class Tap
     SystemCommand.run!("git", args:, chdir:, env: { "GIT_TERMINAL_PROMPT" => "0" }, print_stderr: true)
   end
 
+  # Like {#git_command!} but does not raise on failure.
+  sig { params(args: T::Array[T.any(String, Pathname)], chdir: T.nilable(Pathname)).returns(T.untyped) }
+  def git_command(args, chdir: nil)
+    require "system_command"
+
+    SystemCommand.run("git", args:, chdir:, env: { "GIT_TERMINAL_PROMPT" => "0" }, print_stderr: false)
+  end
+  private :git_command
+
+  # The contents of the tap's `Tapfile` at `HEAD`, or `nil` if there is none.
+  sig { returns(T.nilable(String)) }
+  def tapfile_contents
+    result = git_command(%w[cat-file blob HEAD:Tapfile], chdir: path)
+    return unless result.success?
+
+    result.stdout
+  end
+  private :tapfile_contents
+
+  # Materialise the working tree of a fresh `--filter=blob:none --no-checkout`
+  # clone, applying the tap's `Tapfile` filter (if any) via sparse checkout so
+  # that only the filtered blobs are ever downloaded.
+  sig { params(quiet: T::Boolean).void }
+  def checkout_with_tapfile_filter!(quiet: false)
+    if (contents = tapfile_contents)
+      write_tapfile_sparse_checkout!(contents)
+    end
+
+    args = %w[checkout]
+    args << "-q" if quiet
+    git_command!(args, chdir: path)
+  end
+  private :checkout_with_tapfile_filter!
+
+  # Enable sparse checkout for the given `Tapfile` contents and write its
+  # patterns to `.git/info/sparse-checkout`, leaving the matching to Git.
+  #
+  # Cone mode is deliberately not used: it also force-materialises every
+  # root-level file, which would silently widen the filter a tap declared.
+  sig { params(contents: String).void }
+  def write_tapfile_sparse_checkout!(contents)
+    require "tapfile"
+
+    sparse_checkout = Tapfile.parse(contents).sparse_checkout
+
+    git_command!(%w[config core.sparseCheckout true], chdir: path)
+    git_command!(%w[config core.sparseCheckoutCone false], chdir: path)
+    git_command!(%w[config homebrew.tapfilter true], chdir: path)
+
+    sparse_checkout_file = path/".git/info/sparse-checkout"
+    sparse_checkout_file.dirname.mkpath
+    sparse_checkout_file.atomic_write(sparse_checkout)
+  end
+  private :write_tapfile_sparse_checkout!
+
+  # Re-apply the tap's `Tapfile` filter after an update: rewrite the sparse
+  # checkout patterns from the new `HEAD`, or fully materialise the tap if the
+  # `Tapfile` was removed upstream. No-op for taps that neither were filtered
+  # nor contain a `Tapfile`.
+  #
+  # This runs for every installed tap on every update, so the common case (a tap
+  # that has never been filtered and ships no `Tapfile`) is settled with two
+  # stat calls before any `git` process is spawned. A filtered tap always
+  # materialises its own `Tapfile`, and an unfiltered tap that gained one
+  # upstream has it on disk after the update.
+  sig { void }
+  def reapply_tapfile_filter!
+    return if !(path/"Tapfile").exist? && !(path/".git/info/sparse-checkout").exist?
+
+    filtered = git_command(%w[config --get homebrew.tapfilter], chdir: path).stdout.chomp == "true"
+    contents = tapfile_contents
+    return if !filtered && contents.nil?
+
+    if contents
+      write_tapfile_sparse_checkout!(contents)
+      result = git_command(%w[sparse-checkout reapply], chdir: path)
+      # `git sparse-checkout reapply` requires Git 2.25; fall back for older Git.
+      git_command!(%w[read-tree -mu HEAD], chdir: path) unless result.success?
+    else
+      # The `Tapfile` was removed upstream: materialise everything while
+      # sparse checkout is still enabled (so `skip-worktree` bits are
+      # cleared), then disable it.
+      sparse_checkout_file = path/".git/info/sparse-checkout"
+      sparse_checkout_file.dirname.mkpath
+      sparse_checkout_file.atomic_write("/*\n")
+      result = git_command(%w[sparse-checkout reapply], chdir: path)
+      git_command!(%w[read-tree -mu HEAD], chdir: path) unless result.success?
+      git_command!(%w[config core.sparseCheckout false], chdir: path)
+      git_command(%w[config --unset homebrew.tapfilter], chdir: path)
+      FileUtils.rm_f sparse_checkout_file
+    end
+  end
+
   # Install this {Tap}.
   #
   # @param clone_target If passed, it will be used as the clone remote.
@@ -690,6 +783,7 @@ class Tap
       args << "-q" if quiet
       result = git_command!(args, chdir: path)
       update_remote_from_git_redirect!(result.stderr, quiet:)
+      reapply_tapfile_filter!
       return
     elsif (core_tap? || core_cask_tap?) && !Homebrew::EnvConfig.no_install_from_api? && !force &&
           worktree_source_tap_path.blank?
@@ -712,6 +806,13 @@ class Tap
     args << "--template="
     # Prevent `fsmonitor` from watching this repository.
     args << "--config" << "core.fsmonitor=false"
+    # Clone third-party taps without blobs or a checkout so that the tap's
+    # `Tapfile` (if any) can filter which paths are materialised before any
+    # file contents are fetched. These must precede `--end-of-options`, after
+    # which Git treats every argument as positional.
+    filtered_clone = !core_tap? && !core_cask_tap? && Utils::Git.supports_partial_clone_sparse_checkout?
+    args << "--filter=blob:none" << "--no-checkout" if filtered_clone
+
     args << "--end-of-options" << requested_remote << path.to_s
 
     begin
@@ -724,6 +825,7 @@ class Tap
       else
         result = git_command!(args)
         update_remote_from_git_redirect!(result.stderr, quiet:)
+        checkout_with_tapfile_filter!(quiet:) if filtered_clone
       end
 
       if verify && !Homebrew::EnvConfig.developer? && !Readall.valid_tap?(self, aliases: true)
