@@ -802,13 +802,14 @@ class Tap
     args << "--template="
     # Prevent `fsmonitor` from watching this repository.
     args << "--config" << "core.fsmonitor=false"
-    args << "--end-of-options" << requested_remote << path.to_s
-
     # Clone third-party taps without blobs or a checkout so that the tap's
     # `Tapfile` (if any) can filter which paths are materialised before any
-    # file contents are fetched.
+    # file contents are fetched. These must precede `--end-of-options`, after
+    # which Git treats every argument as positional.
     filtered_clone = !core_tap? && !core_cask_tap? && Utils::Git.supports_partial_clone_sparse_checkout?
     args << "--filter=blob:none" << "--no-checkout" if filtered_clone
+
+    args << "--end-of-options" << requested_remote << path.to_s
 
     begin
       if worktree_source_tap_path
