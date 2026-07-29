@@ -65,7 +65,7 @@ class Tapfile
 
   sig { params(filter: Filter).void }
   def initialize(filter)
-    @filter = T.let(filter, Filter)
+    @filter = filter
   end
 
   # Whether the repository-relative `path` should be materialised.
