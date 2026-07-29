@@ -432,7 +432,7 @@ RSpec.describe Tap do
 
   describe "#prefix_to_versioned_formulae_names" do
     it "groups versioned full formulae with their matching full formula" do
-      homebrew_foo_tap.instance_variable_set(:@prefix_to_versioned_formulae_names, nil)
+      homebrew_foo_tap.clear_cache
       allow(homebrew_foo_tap).to receive(:formula_names).and_return(["foo@2.0", "foo-full", "foo@2.0-full"])
 
       expect(homebrew_foo_tap.prefix_to_versioned_formulae_names)
@@ -460,10 +460,10 @@ RSpec.describe Tap do
       expect(homebrew_foo_tap.remote).to be_nil
     end
 
-    it "returns nil if Git is not available" do
+    it "reads the remote from .git/config even when Git is unavailable" do
       setup_git_repo
       allow(Utils::Git).to receive(:available?).and_return(false)
-      expect(homebrew_foo_tap.remote).to be_nil
+      expect(homebrew_foo_tap.remote).to eq("https://github.com/Homebrew/homebrew-foo")
     end
   end
 
@@ -500,10 +500,10 @@ RSpec.describe Tap do
       expect(homebrew_foo_tap.remote_repository).to be_nil
     end
 
-    it "returns nil if Git is not available" do
+    it "reads the remote repository from .git/config even when Git is unavailable" do
       setup_git_repo
       allow(Utils::Git).to receive(:available?).and_return(false)
-      expect(homebrew_foo_tap.remote_repository).to be_nil
+      expect(homebrew_foo_tap.remote_repository).to eq("Homebrew/homebrew-foo")
     end
   end
 
@@ -699,6 +699,21 @@ RSpec.describe Tap do
     end
   end
 
+  describe "#fix_remote_configuration" do
+    it "terminates options before the requested remote" do
+      tap = described_class.fetch("dashy", "foo")
+      tap.path.mkpath
+      allow(tap).to receive(:remote)
+      allow(tap).to receive(:safe_system)
+      expect(tap).to receive(:safe_system)
+        .with("git", "remote", "set-url", "origin", "--end-of-options", "-u:evil")
+
+      tap.fix_remote_configuration(requested_remote: "-u:evil")
+    ensure
+      FileUtils.rm_rf HOMEBREW_TAP_DIRECTORY/"dashy"
+    end
+  end
+
   specify "Git variant" do
     touch path/"README"
     setup_git_repo
@@ -718,7 +733,7 @@ RSpec.describe Tap do
       expect(SystemCommand).to receive(:run!)
         .with("git", args: %w[fetch], chdir: path, env: { "GIT_TERMINAL_PROMPT" => "0" }, print_stderr: true)
 
-      homebrew_foo_tap.send(:git_command!, %w[fetch], chdir: path)
+      homebrew_foo_tap.git_command!(%w[fetch], chdir: path)
     end
 
     it "raises an error when the Tap is already tapped" do
@@ -867,8 +882,8 @@ RSpec.describe Tap do
       allow(tap).to receive_messages(command_files: [], formula_files: [], cask_files: [],
                                      formula_names: [], cask_tokens: [], link_completions_and_manpages: nil)
       expect(tap).to receive(:git_command!)
-        .with(["clone", requested_remote, tap.path.to_s, "--origin=origin", "--template=",
-               "--config", "core.fsmonitor=false"])
+        .with(["clone", "--origin=origin", "--template=", "--config", "core.fsmonitor=false",
+               "--end-of-options", requested_remote, tap.path.to_s])
         .and_wrap_original do
           tap.path.mkpath
           (tap.path/".git").mkpath

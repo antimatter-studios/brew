@@ -3,8 +3,6 @@
 
 require "cachable"
 require "api"
-require "api/source_download"
-require "download_queue"
 
 module Homebrew
   module API
@@ -13,10 +11,7 @@ module Homebrew
       extend T::Generic
       extend Cachable
 
-      # Sorbet type members are mutable by design and cannot be frozen.
-      # rubocop:disable Style/MutableConstant
       Cache = type_template { { fixed: T::Hash[String, T.untyped] } }
-      # rubocop:enable Style/MutableConstant
 
       private_class_method :cache
 
@@ -71,11 +66,10 @@ module Homebrew
       end
 
       sig {
-        params(download_queue: Homebrew::DownloadQueue, stale_seconds: T.nilable(Integer), enqueue: T::Boolean)
+        params(download_queue: DownloadQueueType, stale_seconds: T.nilable(Integer), enqueue: T::Boolean)
           .returns([T::Hash[String, T.untyped], T::Boolean])
       }
-      def self.fetch_packages_api!(download_queue: Homebrew.default_download_queue, stale_seconds: nil,
-                                   enqueue: false)
+      def self.fetch_packages_api!(download_queue: nil, stale_seconds: nil, enqueue: false)
         old_failed = Homebrew.failed?
         json_contents, updated = begin
           Homebrew::API.fetch_json_api_file(packages_endpoint, stale_seconds:, download_queue:, enqueue:)
@@ -115,7 +109,7 @@ module Homebrew
 
         Homebrew::API.write_names_file!(formula_hashes.keys, "formula", regenerate:)
         Homebrew::API.write_aliases_file!(formula_aliases, "formula", regenerate:)
-        Homebrew::API.write_executables_file!(formula_hashes, regenerate:)
+        Homebrew::API.write_executables_file!(formula_hashes, regenerate:, source: cached_packages_json_file_path)
       end
 
       sig { params(regenerate: T::Boolean).void }
@@ -123,6 +117,13 @@ module Homebrew
         download_and_cache_data! unless cache.key?("cask_hashes")
 
         Homebrew::API.write_names_file!(cask_hashes.keys, "cask", regenerate:)
+      end
+
+      # Whether formula hashes are already loaded, so callers can use them
+      # opportunistically without triggering a download and full JSON parse.
+      sig { returns(T::Boolean) }
+      def self.formula_hashes_cached?
+        cache.key?("formula_hashes")
       end
 
       sig { returns(T::Hash[String, T::Hash[String, T.untyped]]) }

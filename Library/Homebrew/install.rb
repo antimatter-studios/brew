@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "diagnostic"
+require "diagnostic/finding"
 require "fileutils"
 require "hardware"
 require "development_tools"
@@ -30,11 +31,10 @@ module Homebrew
       def check_cc_argv(cc)
         return unless cc
 
-        @checks ||= T.let(Diagnostic::Checks.new, T.nilable(Homebrew::Diagnostic::Checks))
         opoo <<~EOS
           You passed `--cc=#{cc}`.
 
-          #{@checks.support_tier_message(tier: 3)}
+          #{Diagnostic::Finding.support_tier_message(tier: 3)}
         EOS
       end
 
@@ -481,6 +481,8 @@ module Homebrew
           puts formulae_names_to_install.join(" ")
 
           formula_installers.each do |fi|
+            next if fi.ignore_deps?
+
             print_dry_run_dependencies(fi.formula, fi.compute_dependencies, &:name)
           end
           return
@@ -505,20 +507,21 @@ module Homebrew
       def print_dry_run_dependencies(formula, dependencies, skip_formula_names: [], &_block)
         return if dependencies.empty?
 
-        formula_names = dependencies.filter_map do |dep|
+        entries = dependencies.filter_map do |dep|
           dependency = dep.to_formula
           next if skip_formula_names.include?(dependency.full_name)
 
-          name = yield dependency
-          installed = dependency.any_version_installed?
-          pretty_install_status(name, installed:, outdated: installed && dependency.outdated?,
-                                mark_uninstalled: false, bold: false)
+          [dependency.any_version_installed?, yield(dependency)]
         end
-        return if formula_names.empty?
 
-        ohai "Would install #{Utils.pluralize("dependency", formula_names.count, include_count: true)} " \
-             "for #{formula.name}:"
-        puts formula_names.join("\n")
+        upgrade, install = entries.partition(&:first)
+        { install:, upgrade: }.each do |verb, group|
+          next if group.empty?
+
+          ohai "Would #{verb} #{Utils.pluralize("dependency", group.count, include_count: true)} " \
+               "for #{formula.name}:"
+          puts Upgrade.format_upgrade_summary(group.map(&:last))
+        end
       end
 
       # If asking the user is enabled, show dry-run information.
@@ -671,7 +674,9 @@ module Homebrew
         ).returns(T::Boolean)
       }
       def formulae_ask_prompt_needed?(formulae_installer, dependants)
-        formulae_installer.any? { |formula_installer| formula_installer.compute_dependencies.present? } ||
+        formulae_installer.any? do |formula_installer|
+          !formula_installer.ignore_deps? && formula_installer.compute_dependencies.present?
+        end ||
           dependants.upgradeable.present?
       end
 
@@ -715,6 +720,16 @@ module Homebrew
         ask_input(action:)
       end
 
+      sig { params(all_fatal: T::Boolean).void }
+      def perform_preinstall_checks(all_fatal: false)
+        check_prefix
+        check_cpu
+        attempt_directory_creation
+        Diagnostic.checks(:supported_configuration_checks, fatal: all_fatal)
+        Diagnostic.checks(:preinstall_checks, fatal: false)
+        Diagnostic.checks(:fatal_preinstall_checks)
+      end
+
       private
 
       sig { params(action: String).returns(String) }
@@ -734,16 +749,6 @@ module Homebrew
         [formula, *formula.old_installed_formulae].map(&:linked_keg)
                                                   .select(&:directory?)
                                                   .map { |k| Keg.new(k.resolved_path) }
-      end
-
-      sig { params(all_fatal: T::Boolean).void }
-      def perform_preinstall_checks(all_fatal: false)
-        check_prefix
-        check_cpu
-        attempt_directory_creation
-        Diagnostic.checks(:supported_configuration_checks, fatal: all_fatal)
-        Diagnostic.checks(:preinstall_checks, fatal: false)
-        Diagnostic.checks(:fatal_preinstall_checks)
       end
 
       sig { void }

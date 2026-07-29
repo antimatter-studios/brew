@@ -1,4 +1,4 @@
-# brew(1) -- The Missing Package Manager for macOS (or Linux)
+# brew(1) -- The Package Manager for Everywhere
 
 ## SYNOPSIS
 
@@ -131,10 +131,10 @@ and are now no longer needed.
 
 ### `bundle` \[*`subcommand`*\]
 
-Bundler for non-Ruby dependencies from Homebrew, Homebrew Cask, Mac App Store
-dependencies, VSCode (and forks/variants) extensions, Go packages, Cargo
-packages, uv tools, Flatpak packages, WinGet packages, Krew plugins and npm
-packages.
+Bundler for non-Ruby dependencies from Homebrew formulae, Homebrew casks, Mac
+App Store dependencies, VSCode (and forks/variants) extensions, Go packages,
+Cargo packages, uv tools, Flatpak packages, WinGet packages, Krew plugins and
+npm packages.
 
 Note: Flatpak support is only available on Linux.
 
@@ -355,7 +355,7 @@ to one or more of the following environment variables:
 : Run an external command in an isolated build environment based on the
   `Brewfile` dependencies.
 
-This sanitized build environment ignores unrequested dependencies, which makes
+This sanitised build environment ignores unrequested dependencies, which makes
 sure that things you didn't specify in your `Brewfile` won't get picked up by
 commands like `bundle install`, `npm install`, etc. It will also add compiler
 flags which will help with finding keg-only dependencies like `openssl`,
@@ -613,8 +613,8 @@ flags which will help with finding keg-only dependencies like `openssl`,
 This workflow is useful for maintainers or testers who regularly install lots of
 formulae.
 
-Unless `--force` is passed, this returns a 1 exit code if anything would be
-removed.
+Unless `--force` is passed, this prompts before removing anything and returns a
+1 exit code if the prompt is declined or cannot be shown.
 
 `--install`
 
@@ -1033,6 +1033,11 @@ passed, this command displays their actual runtime dependencies (similar to
 : List dependencies for formulae that are currently installed. If *`formula`* is
   specified, list only its dependencies that are currently installed.
 
+`--brewfile`
+
+: Use formulae and casks listed in a Brewfile as inputs. Defaults to
+  `./Brewfile`; use `--brewfile=`*`path`* to specify another.
+
 `--missing`
 
 : Show only missing dependencies.
@@ -1296,8 +1301,9 @@ Display brief statistics for your Homebrew installation. If a *`formula`* or
 `--json`
 
 : Print a JSON representation. Currently the default value for *`version`* is
-  `v1` for *`formula`*. For *`formula`* and *`cask`* use `v2`. See the docs for
-  examples of using the JSON output: <https://docs.brew.sh/Querying-Brew>
+  `v1`.`v1` is valid for *`formula`* only. `v2` is valid for both *`formula`*
+  and *`cask`*.See the docs for examples of using the JSON output:
+  <https://docs.brew.sh/Querying-Brew>
 
 `--installed`
 
@@ -2117,9 +2123,8 @@ are also exported to avoid querying them multiple times. To help guarantee
 idempotence, this command produces no output when Homebrew's `bin` and `sbin`
 directories are first and second respectively in your `$PATH`. Consider adding
 evaluation of this command's output to your dotfiles (e.g. `~/.bash_profile` or
-~/.zprofile` on macOS and ~/.bashrc` or ~/.zshrc` on Linux)
-with e.g.:
-  `eval "$(brew shellenv zsh)"` or `eval "$(brew shellenv bash)"\`
+`~/.zprofile` on macOS and `~/.bashrc` or `~/.zshrc` on Linux) with e.g.: `eval
+"$(brew shellenv zsh)"` or `eval "$(brew shellenv bash)"`
 
 The shell should be specified explicitly with a supported shell name parameter
 but will be detected automatically if not provided (but this may not be
@@ -2203,10 +2208,9 @@ provided, display brief statistics for all installed taps.
 
 ### `trust` \[*`options`*\] \[*`target`* ...\]
 
-Trust non-official tap formulae, casks or commands so Homebrew may load them
-when `$HOMEBREW_REQUIRE_TAP_TRUST` is set. Trusted entries are stored in
-`${XDG_CONFIG_HOME}/homebrew/trust.json` if `$XDG_CONFIG_HOME` is set or
-`~/.homebrew/trust.json` otherwise.
+Trust non-official tap formulae, casks or commands so Homebrew may load them.
+Trusted entries are stored in `${XDG_CONFIG_HOME}/homebrew/trust.json` if
+`$XDG_CONFIG_HOME` is set or `~/.homebrew/trust.json` otherwise.
 
 `--tap`
 
@@ -2290,7 +2294,8 @@ Remove a tapped formula repository.
 
 `-f`, `--force`
 
-: Untap even if formulae or casks from this tap are currently installed.
+: Uninstall all formulae and casks from this tap with `--force` before
+  untapping.
 
 ### `untrust` \[*`options`*\] \[*`target`* ...\]
 
@@ -2526,6 +2531,37 @@ dependency for their stable builds.
 Extract a specific *`version`* of *`formula`* into a personal tap and install
 it. The default tap is *`user`*/versions. *`user`* uses the GitHub username if
 available and the local username otherwise.
+
+### `vulns` \[*`options`*\] \[*`formula`* ...\]
+
+Check *`formula`* for known security vulnerabilities using the OSV.dev database.
+
+With no arguments, all installed formulae are checked.
+
+`-d`, `--deps`
+
+: Also check the dependencies of named formulae.
+
+`--no-ignore-patches`
+
+: Report vulnerabilities even when a formula patch resolves them.
+
+`--brewfile`
+
+: Check formulae listed in a Brewfile. Defaults to `./Brewfile`; use
+  `--brewfile=`*`path`* to specify another.
+
+`-s`, `--severity`
+
+: Only report findings at or above: `low`, `medium`, `high`, `critical`.
+
+`-m`, `--max-summary`
+
+: Truncate summaries to *`n`* characters (default 60, 0 for no limit).
+
+`-j`, `--json`
+
+: Output JSON.
 
 ### `which-formula` \[`--explain`\] *`command`* \[...\]
 
@@ -3101,7 +3137,7 @@ Display the source of a *`formula`* or *`cask`*.
 
 : Treat all named arguments as casks.
 
-### `contributions` \[`--user=`\] \[`--repositories=`\] \[`--quarter=`\] \[`--from=`\] \[`--to=`\] \[`--csv`\]
+### `contributions` \[`--user=`\] \[`--repositories=`\] \[`--quarter=`\] \[`--from=`\] \[`--to=`\] \[`--csv`\] \[`--maintainer-report-csv=`\]
 
 Summarise contributions to Homebrew repositories.
 
@@ -3144,6 +3180,22 @@ Summarise contributions to Homebrew repositories.
 `--csv`
 
 : Print a CSV of contributions across repositories over the time period.
+
+`--maintainer-report-csv`
+
+: Print a CSV of Maintainer and Lead Maintainer activity criteria using fetched
+  Git histories and GitHub's existing approved-review search for the Homebrew
+  governance quarter, for example `--maintainer-report-csv=2026-2`. Also write
+  it to `brew-contributions-FROM-to-TO.csv` in the current directory. Only
+  Maintainers listed at the end of that quarter are included. The `new role`
+  value must show a downgrade for two consecutive quarters before a downgrade is
+  applied. Review searches return at most 100 results and other counts are
+  capped at 500 per repository and contribution type. Repository-scoped
+  follow-up searches ensure role activity checks remain accurate when a count is
+  capped. Completed-period GitHub searches are cached in Homebrew's cache and
+  removed by normal cache pruning. `YEAR-1` is December of the previous year
+  through February, `YEAR-2` is March through May, `YEAR-3` is June through
+  August and `YEAR-4` is September through November.
 
 ### `create` \[*`options`*\] *`URL`*
 
@@ -3332,17 +3384,13 @@ Install Homebrew's Bundler gems.
 : Installs the specified comma-separated list of gem groups, in addition to
   those already installed.
 
-### `irb` \[`--examples`\] \[`--pry`\]
+### `irb` \[`--examples`\]
 
 Enter the interactive Homebrew Ruby shell.
 
 `--examples`
 
 : Show several examples.
-
-`--pry`
-
-: Use Pry instead of IRB. Enabled by default if `$HOMEBREW_PRY` is set.
 
 ### `lgtm` \[`--online`\]
 
@@ -3433,7 +3481,7 @@ set or `~/.homebrew/livecheck_watchlist.txt` otherwise.
 : Include packages that are autobumped by BrewTestBot. By default these are
   skipped.
 
-### `prof` \[`--stackprof`\] \[`--vernier`\] *`command`* \[...\]
+### `prof` \[*`options`*\] *`command`* \[...\]
 
 Run Homebrew with a Ruby profiler. For example, `brew prof readall`.
 
@@ -3444,6 +3492,10 @@ Run Homebrew with a Ruby profiler. For example, `brew prof readall`.
 `--vernier`
 
 : Use `vernier` instead of `ruby-prof` (the default).
+
+`--timings`
+
+: Record machine-readable timings for Homebrew command phases.
 
 ### `rubocop`
 
@@ -3550,11 +3602,11 @@ Generate the template files for a new tap.
 
 `--no-git`
 
-: Don't initialize a Git repository for the tap.
+: Don't initialise a Git repository for the tap.
 
 `--branch`
 
-: Initialize Git repository and setup GitHub Actions workflows with the
+: Initialise a Git repository and set up GitHub Actions workflows with the
   specified branch name (default: `main`).
 
 `--github-packages`
@@ -3696,10 +3748,6 @@ and Linux workers.
 `--skip-livecheck`
 
 : Don't test livecheck.
-
-`--skip-recursive-dependents`
-
-: Only test the direct dependents.
 
 `--skip-checksum-only-audit`
 
@@ -3952,6 +4000,12 @@ Update versions for PyPI resource blocks in *`formula`*.
 
 : Don't fail if *`formula`* is not a PyPI package.
 
+`--ignore-main-package-cooldown`
+
+: Bypass the release cooldown for *`formula`*'s own package when resolving
+  resources. Its dependencies still respect the cooldown. This option is ignored
+  for official taps.
+
 `--install-dependencies`
 
 : Install missing dependencies required to update resources.
@@ -4186,9 +4240,9 @@ can take several different forms:
 
 ## SPECIFYING CASKS
 
-Many Homebrew Cask commands accept one or more *`cask`* arguments. These can be
-specified the same way as the *`formula`* arguments described in `SPECIFYING
-FORMULAE` above.
+Many commands that work with casks accept one or more *`cask`* arguments. These
+can be specified the same way as the *`formula`* arguments described in
+`SPECIFYING FORMULAE` above.
 
 ## ENVIRONMENT
 
@@ -4296,12 +4350,12 @@ command execution (e.g. `$(cat file)`).
 
 `HOMEBREW_BOTTLE_DOMAIN`
 
-: Use this URL as the download mirror for bottles. If bottles at that URL are
-  temporarily unavailable, the default bottle domain will be used as a fallback
-  mirror. For example, `export HOMEBREW_BOTTLE_DOMAIN=http://localhost:8080`
-  will cause all bottles to download from the prefix `http://localhost:8080/`.
-  If bottles are not available at `$HOMEBREW_BOTTLE_DOMAIN` they will be
-  downloaded from the default bottle domain.
+: Use this URL as the download mirror for bottles and their manifests. If a
+  bottle or manifest is unavailable at the mirror, the default bottle domain
+  will be used as a fallback. Prefer `$HOMEBREW_ARTIFACT_DOMAIN` for a mirror
+  that transparently proxies all Homebrew downloads. For example, `export
+  HOMEBREW_BOTTLE_DOMAIN=http://localhost:8080` will cause all bottles to
+  download from the prefix `http://localhost:8080/`.
   
   *Default:* `https://ghcr.io/v2/homebrew/core`.
 
@@ -4543,7 +4597,7 @@ command execution (e.g. `$(cat file)`).
 
 : Use this base64 encoded username and password for authenticating with a Docker
   registry proxying GitHub Packages. If set to `none`, no authentication header
-  will be sent. This can be used, if remote `$HOMEBREW_BOTTLE_DOMAIN` does not
+  will be sent. This can be used, if remote `$HOMEBREW_ARTIFACT_DOMAIN` does not
   support any authentication. If `$HOMEBREW_DOCKER_REGISTRY_TOKEN` is set, it
   will be used instead.
 
@@ -4605,8 +4659,8 @@ command execution (e.g. `$(cat file)`).
 
 `HOMEBREW_FORBIDDEN_LICENSES`
 
-: A space-separated list of SPDX license identifiers. Homebrew will refuse to
-  install a formula if it or any of its dependencies has a license on this list.
+: A space-separated list of SPDX licence identifiers. Homebrew will refuse to
+  install a formula if it or any of its dependencies has a licence on this list.
 
 `HOMEBREW_FORBIDDEN_OWNER`
 
@@ -4909,10 +4963,6 @@ command execution (e.g. `$(cat file)`).
   
   *Default:* `https://pypi.org/simple`.
 
-`HOMEBREW_PRY`
-
-: If set, use Pry for the `brew irb` command.
-
 `HOMEBREW_REQUIRE_TAP_TRUST`
 
 : If set, require non-official tap formulae, casks and commands to be trusted
@@ -4921,11 +4971,6 @@ command execution (e.g. `$(cat file)`).
   all formulae and casks.
   
   *Default:* `true`.
-
-`HOMEBREW_SBOM`
-
-: If set, Homebrew will write SBOM files and run SBOM-related installation
-  logic.
 
 `HOMEBREW_SIMULATE_MACOS_ON_LINUX`
 
@@ -5067,14 +5112,14 @@ Homebrew API: <https://docs.brew.sh/rubydoc/>
 
 Homebrew's Project Leader is Mike McQuaid.
 
-Homebrew's Lead Maintainers are Bevan Kay, Bo Anderson, Branch Vincent, Carlo
-Cabrera, Dustin Rodrigues, FX Coudert, Issy Long, Justin Krehel, Michael Cho,
-Michka Popoff, Mike McQuaid, Nanda H Krishna, Patrick Linnane, Rui Chen, Ruoyu
-Zhong, Sam Ford, Sean Molenaar and Thierry Moisan.
+Homebrew's Lead Maintainers are Bevan Kay, Carlo Cabrera, Issy Long, Justin
+Krehel, Michael Cho, Mike McQuaid, Nanda H Krishna, Patrick Linnane, Rui Chen,
+Ruoyu Zhong, Sam Ford and Sean Molenaar.
 
-Homebrew's other Maintainers are Anton Melnikov, Caleb Xu, Daeho Ro, Douglas
-Eichelberger, Eric Knibbe, Klaus Hipp, Markus Reiter, Rylan Polster, Štefan
-Baebler and William Woodruff.
+Homebrew's other Maintainers are Andrew Nesbitt, Anton Melnikov, Bo Anderson,
+Branch Vincent, Caleb Xu, Daeho Ro, Douglas Eichelberger, Dustin Rodrigues, FX
+Coudert, Klaus Hipp, Markus Reiter, Michka Popoff, Rylan Polster, Stefan
+Baebler, Thierry Moisan and William Woodruff.
 
 ## BUGS
 

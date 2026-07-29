@@ -148,6 +148,41 @@ RSpec.describe Utils::Analytics do
       expect(described_class).to receive(:deferred_curl).once
       described_class.report_influx(:install, { on_request: }, { package:, tap_name: })
     end
+
+    it "escapes WSL tag values for Influx line protocol" do
+      ENV.delete("HOMEBREW_NO_ANALYTICS_THIS_RUN")
+      ENV.delete("HOMEBREW_NO_ANALYTICS")
+      allow(Time).to receive(:now).and_return(Time.at(123))
+      expect(described_class).to receive(:deferred_curl).with(
+        anything,
+        array_including(
+          "--data-binary",
+          'formula_install,os=Linux\ [WSL] os_name_and_version="Ubuntu 24.04 LTS [WSL]" 123',
+        ),
+      )
+
+      described_class.report_influx(
+        :formula_install,
+        { os: "Linux#{Utils::Analytics::WSL_SUFFIX}" },
+        { os_name_and_version: "Ubuntu 24.04 LTS#{Utils::Analytics::WSL_SUFFIX}" },
+      )
+    end
+  end
+
+  describe "::deferred_curl" do
+    it "forwards args and silences subprocess output outside debug mode" do
+      ENV.delete("HOMEBREW_ANALYTICS_DEBUG")
+
+      allow(Utils::Curl).to receive(:curl_executable).and_return("/usr/bin/curl")
+      allow(Utils::Curl).to receive(:curl_args) { |*args, **| args }
+      expect(described_class).to receive(:spawn)
+        .with("/usr/bin/curl", "--max-time", "3", "--silent", "--output", File::NULL, "https://example.com",
+              out: File::NULL, err: File::NULL)
+        .and_return(123)
+      expect(Process).to receive(:detach).with(123)
+
+      described_class.deferred_curl("https://example.com", ["--max-time", "3"])
+    end
   end
 
   describe "::report_build_error" do
@@ -207,9 +242,49 @@ RSpec.describe Utils::Analytics do
       ENV.delete("HOMEBREW_NO_ANALYTICS_THIS_RUN")
       ENV.delete("HOMEBREW_NO_ANALYTICS")
       ENV["HOMEBREW_ANALYTICS_DEBUG"] = "true"
+      expect(Homebrew::EnvConfig).not_to receive(:non_default_variable?)
       expect(described_class).to receive(:report_influx).with(
         :command_run,
         hash_including(command:),
+        hash_including(options:),
+      ).once
+      described_class.report_command_run(command_instance)
+    end
+
+    it "samples one environment configuration for selected commands" do
+      ENV.delete("HOMEBREW_NO_ANALYTICS_THIS_RUN")
+      ENV.delete("HOMEBREW_NO_ANALYTICS")
+      ENV["HOMEBREW_ANALYTICS_DEBUG"] = "true"
+      allow(command_instance.class).to receive(:command_name).and_return("update")
+      stub_const("Homebrew::EnvConfig::ANALYTICS_VARIABLES", [:HOMEBREW_ALLOWED_TAPS])
+      ENV["HOMEBREW_ALLOWED_TAPS"] = "homebrew/core"
+      ENV["HOMEBREW_USER_SET_VARS"] = "HOMEBREW_ALLOWED_TAPS"
+      expect(Homebrew::EnvConfig).to receive(:non_default_variable?).with(:HOMEBREW_ALLOWED_TAPS).and_return(true)
+
+      expect(described_class).to receive(:report_influx).with(
+        :command_run,
+        hash_including(
+          command:          "update",
+          env_config:       "HOMEBREW_ALLOWED_TAPS",
+          env_config_state: "non_default",
+        ),
+        hash_including(options:),
+      ).once
+      described_class.report_command_run(command_instance)
+    end
+
+    it "samples variables exported by brew itself as unset" do
+      ENV.delete("HOMEBREW_NO_ANALYTICS_THIS_RUN")
+      ENV.delete("HOMEBREW_NO_ANALYTICS")
+      ENV["HOMEBREW_ANALYTICS_DEBUG"] = "true"
+      allow(command_instance.class).to receive(:command_name).and_return("update")
+      stub_const("Homebrew::EnvConfig::ANALYTICS_VARIABLES", [:HOMEBREW_ALLOWED_TAPS])
+      ENV["HOMEBREW_ALLOWED_TAPS"] = "homebrew/core"
+      ENV["HOMEBREW_USER_SET_VARS"] = ""
+
+      expect(described_class).to receive(:report_influx).with(
+        :command_run,
+        hash_including(env_config: "HOMEBREW_ALLOWED_TAPS", env_config_state: "unset"),
         hash_including(options:),
       ).once
       described_class.report_command_run(command_instance)

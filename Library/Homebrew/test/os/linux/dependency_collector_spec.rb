@@ -59,7 +59,7 @@ RSpec.describe DependencyCollector do
     end
 
     around do |example|
-      with_env(HOMEBREW_TESTS: nil) { example.run }
+      with_env(HOMEBREW_SANDBOX_LINUX_LANDLOCK: nil, HOMEBREW_TESTS: nil) { example.run }
     end
 
     before do
@@ -89,8 +89,14 @@ RSpec.describe DependencyCollector do
       expect(collector.bubblewrap_dep_if_needed(Set.new)).to be_nil
     end
 
+    it "returns nil when using Landlock" do
+      with_env(HOMEBREW_SANDBOX_LINUX_LANDLOCK: "1") do
+        expect(collector.bubblewrap_dep_if_needed(Set.new)).to be_nil
+      end
+    end
+
     it "returns nil for Bubblewrap and its dependencies" do
-      collector.send(:global_dep_tree)["bubblewrap"] = Set["libcap"]
+      collector.global_dep_tree["bubblewrap"] = Set["libcap"]
 
       expect(collector.bubblewrap_dep_if_needed(Set["bubblewrap"])).to be_nil
       expect(collector.bubblewrap_dep_if_needed(Set["libcap"])).to be_nil

@@ -49,6 +49,9 @@ class FormulaInstaller
   sig { returns(Homebrew::DownloadQueue) }
   attr_accessor :download_queue
 
+  sig { params(ran_prelude: T::Boolean).void }
+  attr_writer :ran_prelude
+
   sig {
     params(
       formula:                    Formula,
@@ -113,7 +116,7 @@ class FormulaInstaller
     @debug_symbols = debug_symbols
     @installed_on_request = installed_on_request
     link_keg ||= !formula.keg_only? || auto_link_versioned_keg_only?
-    @link_keg = T.let(link_keg, T::Boolean)
+    @link_keg = link_keg
     @show_header = show_header
     @ignore_deps = ignore_deps
     @only_deps = only_deps
@@ -148,6 +151,7 @@ class FormulaInstaller
     @formula = T.let(T.must(previously_fetched_formula), Formula) if previously_fetched_formula
 
     @ran_prelude_fetch = T.let(false, T::Boolean)
+    @ran_prelude = T.let(false, T::Boolean)
   end
 
   sig { returns(T::Boolean) }
@@ -195,14 +199,17 @@ class FormulaInstaller
   sig { returns(T::Boolean) }
   def verbose? = @verbose
 
+  sig { returns(T::Boolean) }
+  def self.show_missing_bottle_metadata_warning?
+    return false if @missing_bottle_metadata_warning_shown
+
+    @missing_bottle_metadata_warning_shown = T.let(true, T.nilable(TrueClass))
+    true
+  end
+
   sig { returns(T::Set[Formula]) }
   def self.attempted
     @attempted ||= T.let(Set.new, T.nilable(T::Set[Formula]))
-  end
-
-  sig { void }
-  def self.clear_attempted
-    @attempted = T.let(Set.new, T.nilable(T::Set[Formula]))
   end
 
   sig { returns(T::Set[Formula]) }
@@ -210,19 +217,9 @@ class FormulaInstaller
     @installed ||= T.let(Set.new, T.nilable(T::Set[Formula]))
   end
 
-  sig { void }
-  def self.clear_installed
-    @installed = T.let(Set.new, T.nilable(T::Set[Formula]))
-  end
-
   sig { returns(T::Set[Formula]) }
   def self.fetched
     @fetched ||= T.let(Set.new, T.nilable(T::Set[Formula]))
-  end
-
-  sig { void }
-  def self.clear_fetched
-    @fetched = T.let(Set.new, T.nilable(T::Set[Formula]))
   end
 
   sig { returns(T::Boolean) }
@@ -268,7 +265,7 @@ class FormulaInstaller
       return false
     end
 
-    return true if formula.local_bottle_path.present?
+    return true if formula.local_bottle_path
 
     bottle = api_bottle || formula.bottle_for_tag(Utils::Bottles.tag)
     return false if bottle.nil?
@@ -354,6 +351,7 @@ class FormulaInstaller
     check_install_sanity
 
     install_fetch_deps if !ignore_deps? && Homebrew::EnvConfig.download_concurrency <= 1
+    @ran_prelude = true
   end
 
   sig { void }
@@ -473,7 +471,8 @@ class FormulaInstaller
     end
 
     recursive_deps = if pour_bottle?
-      formula.runtime_dependencies
+      # Include implicit dependencies (except duplicates) in formulae to check
+      (formula.runtime_dependencies + formula.deps.select(&:implicit?)).uniq(&:name)
     else
       formula.recursive_dependencies
     end
@@ -554,7 +553,7 @@ class FormulaInstaller
     lock
 
     start_time = Time.now
-    if !pour_bottle? && DevelopmentTools.installed?
+    unless pour_bottle?
       require "install"
       Homebrew::Install.perform_build_from_source_checks
     end
@@ -774,7 +773,12 @@ on_request: installed_on_request?, options:)
   def expand_dependencies_for_formula(formula)
     # Cache for this expansion only. FormulaInstaller has a lot of inputs which can alter expansion.
     cache_key = "FormulaInstaller-#{formula.full_name}-#{Time.now.to_f}"
-    Dependency.expand(formula, cache_key:) do |dependent, dep|
+    formula_cache = T.let({}, T::Hash[Dependency, Formula])
+    satisfied_cache = T.let(
+      {},
+      T::Hash[T::Array[T.nilable(T.any(Dependency, String, Integer))], T::Boolean],
+    )
+    Dependency.expand(formula, cache_key:, formula_cache:) do |dependent, dep|
       dependent = T.cast(dependent, Formula)
       build = effective_build_options_for(dependent)
 
@@ -788,11 +792,19 @@ on_request: installed_on_request?, options:)
       minimum_revision = @bottle_tab_runtime_dependencies.dig(dep.name, "revision")&.to_i
       bottle_os_version = @bottle_built_os_version
 
-      if dep.prune_from_option?(build) || ((dep.build? || dep.test?) && !keep_build_test)
-        next Dependable::PRUNE
-      elsif dep.satisfied?(minimum_version:, minimum_revision:, bottle_os_version:)
-        next Dependable::SKIP
+      next Dependable::PRUNE if dep.prune_from_option?(build) || ((dep.build? || dep.test?) && !keep_build_test)
+
+      satisfied_cache_key = T.let([
+        dep,
+        minimum_version&.to_s,
+        minimum_revision,
+        bottle_os_version,
+      ], T::Array[T.nilable(T.any(Dependency, String, Integer))])
+      satisfied = satisfied_cache.fetch(satisfied_cache_key) do
+        satisfied_cache[satisfied_cache_key] = dep.satisfied?(minimum_version:, minimum_revision:, bottle_os_version:)
       end
+
+      next Dependable::SKIP if satisfied
     end
   end
 
@@ -832,12 +844,13 @@ on_request: installed_on_request?, options:)
                                 outdated: installed && dep_formula.outdated?, mark_uninstalled: false,
                                 bold: false)
         end
-        oh1 "Installing dependencies for #{formula.full_name}: #{names.to_sentence}", truncate: false
+        oh1 "Installing dependencies for #{formula.full_name}:#{Tty.reset} #{names.to_sentence}",
+            truncate: false
       end
       deps_with_formulae.each { |dep, dep_formula| install_dependency(dep, dep_formula) }
     end
 
-    @show_header = true if deps.length > 1
+    @show_header = true unless deps.empty?
   end
 
   sig { params(dep: Dependency).void }
@@ -1003,12 +1016,7 @@ on_request: installed_on_request?, options:)
       end
     else
       formula.install_etc_var
-      if formula.post_install_steps_defined?
-        formula.warn_on_post_install_steps_conflict if formula.post_install_steps_conflict? && !quiet?
-        formula.run_post_install_steps
-      elsif formula.post_install_defined?
-        post_install
-      end
+      post_install if formula.post_install_steps_defined? || formula.post_install_defined?
     end
 
     keg.prepare_debug_symbols if debug_symbols?
@@ -1028,8 +1036,18 @@ on_request: installed_on_request?, options:)
     tab.runtime_dependencies = Tab.runtime_deps_hash(formula, f_runtime_deps)
     tab.write
 
-    # write/update a SBOM file (if requested and we aren't bottling)
-    if Homebrew::EnvConfig.sbom? && !build_bottle?
+    # Update packaged SBOM metadata or write a source-install SBOM.
+    if @poured_bottle
+      if (install_time = tab.time)
+        require "sbom"
+        SBOM.update_pour_metadata(
+          SBOM.spdxfile(formula),
+          homebrew_version: HOMEBREW_VERSION,
+          time:             install_time,
+          supplement:       (api_bottle || formula.bottle)&.sbom_supplement,
+        )
+      end
+    elsif Homebrew::EnvConfig.sbom? && !build_bottle?
       require "sbom"
       sbom = SBOM.create(formula, tab)
       sbom.write(validate: Homebrew::EnvConfig.developer?)
@@ -1360,7 +1378,7 @@ on_request: installed_on_request?, options:)
 
     keg_formula_path = installed_prefix/".brew/#{formula.name}.rb"
     return keg_formula_path if formula.loaded_from_api?
-    return keg_formula_path if formula.local_bottle_path.present?
+    return keg_formula_path if formula.local_bottle_path
     return keg_formula_path if build_from_source?
 
     return keg_formula_path unless tap_formula_path.exist?
@@ -1388,24 +1406,26 @@ on_request: installed_on_request?, options:)
 
     args << post_install_formula_path
 
-    if use_sandbox?("running post-install")
-      sandbox = Sandbox.new
-      formula.logs.mkpath
-      sandbox.record_log(formula.logs/"postinstall.sandbox.log")
-      sandbox.allow_write_temp_and_cache
-      sandbox.allow_write_log(formula)
-      sandbox.allow_write_xcode
-      sandbox.deny_write_homebrew_repository
-      sandbox.deny_read_home
-      sandbox.allow_write_cellar(formula)
-      sandbox.deny_all_network unless formula.network_access_allowed?(:postinstall)
-      Keg.keg_link_directories.each do |dir|
-        sandbox.allow_write_path "#{HOMEBREW_PREFIX}/#{dir}"
-      end
-      sandbox.run(*args)
-    else
-      Utils.safe_fork do
-        exec(*args)
+    with_preserved_brew_file do
+      if use_sandbox?("running post-install")
+        sandbox = Sandbox.new
+        formula.logs.mkpath
+        sandbox.record_log(formula.logs/"postinstall.sandbox.log")
+        sandbox.allow_write_temp_and_cache
+        sandbox.allow_write_log(formula)
+        sandbox.allow_write_xcode
+        sandbox.deny_write_homebrew_repository
+        sandbox.deny_read_home
+        sandbox.allow_write_cellar(formula)
+        sandbox.deny_all_network unless formula.network_access_allowed?(:postinstall)
+        Keg.keg_link_directories.each do |dir|
+          sandbox.allow_write_path "#{HOMEBREW_PREFIX}/#{dir}"
+        end
+        sandbox.run(*args)
+      else
+        Utils.safe_fork do
+          exec(*args)
+        end
       end
     end
   # Handle all possible exceptions when postinstall does not complete.
@@ -1450,7 +1470,7 @@ on_request: installed_on_request?, options:)
   sig { params(quiet: T::Boolean, enqueue: T::Boolean).void }
   def fetch_bottle_tab(quiet: false, enqueue: false)
     return if @fetch_bottle_tab
-    return if formula.local_bottle_path.present?
+    return if formula.local_bottle_path
 
     if (bottle = api_bottle || formula.bottle) &&
        (manifest_resource = bottle.github_packages_manifest_resource) &&
@@ -1477,33 +1497,44 @@ on_request: installed_on_request?, options:)
   def enqueue_fetch
     return if previously_fetched_formula
 
+    downloadable_object = T.let(nil, T.nilable(Downloadable))
+    bottle_download = T.let(nil, T.nilable(Downloadable))
+    check_attestation = T.let(false, T::Boolean)
+    local_bottle_path = formula.local_bottle_path
+    bottle_install = !only_deps? && local_bottle_path.nil? && pour_bottle?(output_warning: true)
+    # We skip `gh` to avoid a bootstrapping cycle, in the off-chance a user attempts
+    # to explicitly `brew install gh` without already having a version for bootstrapping.
+    # We also skip bottle installs from local bottle paths, as these are done in CI
+    # as part of the build lifecycle before attestations are produced.
+    verify_attestation = bottle_install &&
+                         Homebrew::EnvConfig.verify_attestations? &&
+                         (formula.tap&.core_tap? || false) &&
+                         formula.name != "gh"
+    if bottle_install && @ran_prelude
+      bottle_download = downloadable
+      check_attestation = verify_attestation && !bottle_download.cached_download.exist?
+      download_queue.enqueue(bottle_download, check_attestation:, stage: false)
+    end
+
     fetch_dependencies
 
     return if only_deps?
-    return if formula.local_bottle_path.present?
+    return if local_bottle_path
 
-    downloadable_object = downloadable
-    check_attestation = if pour_bottle?(output_warning: true)
-      fetch_bottle_tab(enqueue: true)
-
-      !downloadable_object.cached_download.exist?
+    downloadable_object = bottle_download || downloadable
+    if bottle_install
+      if bottle_download.nil?
+        fetch_bottle_tab(enqueue: true)
+        check_attestation = verify_attestation && !downloadable_object.cached_download.exist?
+      end
     else
       @formula = Homebrew::API::Formula.source_download_formula(formula) if formula.loaded_from_api?
 
       formula.enqueue_resources_and_patches(download_queue:)
 
       downloadable_object = downloadable
-
-      false
     end
 
-    # We skip `gh` to avoid a bootstrapping cycle, in the off-chance a user attempts
-    # to explicitly `brew install gh` without already having a version for bootstrapping.
-    # We also skip bottle installs from local bottle paths, as these are done in CI
-    # as part of the build lifecycle before attestations are produced.
-    check_attestation &&= Homebrew::EnvConfig.verify_attestations? &&
-                          (formula.tap&.core_tap? || false) &&
-                          formula.name != "gh"
     # Check attestation after download completes.
     download_queue.enqueue(downloadable_object, check_attestation:)
 
@@ -1550,22 +1581,21 @@ on_request: installed_on_request?, options:)
   sig { void }
   def pour
     HOMEBREW_CELLAR.cd do
-      ohai "Pouring #{downloadable.downloader.basename}"
+      downloadable_object = downloadable
+      ohai "Pouring #{downloadable_object.downloader.basename}"
 
       formula.rack.mkpath
 
       # Download queue may have already extracted the bottle to a temporary directory.
       # We cannot rely on `download_queue` here as dependencies may be poured by another installer.
-      formula_prefix_relative_to_cellar = formula.prefix.relative_path_from(HOMEBREW_CELLAR)
-      bottle_tmp_keg = HOMEBREW_TEMP_CELLAR/formula_prefix_relative_to_cellar
-      bottle_poured_file = Pathname("#{bottle_tmp_keg}.poured")
-
-      if bottle_poured_file.exist?
+      if downloadable_object.is_a?(Bottle) &&
+         (bottle_poured_file = downloadable_object.staged_path_from_download_queue_marker).exist?
+        bottle_tmp_keg = downloadable_object.staged_path_from_download_queue
         FileUtils.rm(bottle_poured_file)
         FileUtils.mv(bottle_tmp_keg, formula.prefix)
         bottle_tmp_keg.parent.rmdir_if_possible
       else
-        downloadable.downloader.stage
+        downloadable_object.downloader.stage
       end
     end
 
@@ -1594,6 +1624,17 @@ on_request: installed_on_request?, options:)
 
     keg = Keg.new(formula.prefix)
     skip_linkage = formula.bottle_specification.skip_relocation?(tab:)
+    if Homebrew::EnvConfig.bottle_domain_custom? && tab.changed_files.nil?
+      if self.class.show_missing_bottle_metadata_warning?
+        opoo <<~EOS
+          No bottle relocation metadata was found for this `HOMEBREW_BOTTLE_DOMAIN`.
+          Homebrew will perform full relocation. Ask the mirror operator to provide
+          an OCI registry proxy of `ghcr.io` that includes manifests and their
+          `sh.brew.tab` annotations, then use `HOMEBREW_ARTIFACT_DOMAIN` instead.
+        EOS
+      end
+      skip_linkage = false
+    end
     keg.replace_placeholders_with_locations(tab.changed_files, skip_linkage:)
 
     cellar = formula.bottle_specification.tag_to_cellar(Utils::Bottles.tag)
@@ -1784,6 +1825,42 @@ on_request: installed_on_request?, options:)
   end
 
   private
+
+  # Landlock cannot protect `bin/brew` while allowing post-install writes to
+  # `bin`, so a malicious post-install could replace `brew` to persist into
+  # later invocations. Snapshot and restore the entry, using a pre-opened `bin`
+  # descriptor to restore its mode before repairing the entry if needed.
+  sig { params(block: T.proc.void).void }
+  def with_preserved_brew_file(&block)
+    return yield if Sandbox.full_write_isolation?
+
+    brew_file = HOMEBREW_PREFIX/"bin/brew"
+    File.open(brew_file.dirname) do |brew_directory|
+      brew_directory_mode = brew_directory.stat.mode & 07777
+      symlink = brew_file.symlink?
+      contents = if symlink
+        brew_file.readlink.to_s
+      else
+        brew_file.binread
+      end
+      brew_file_mode = brew_file.lstat.mode & 07777
+
+      begin
+        yield
+      ensure
+        brew_directory.chmod brew_directory_mode
+        if symlink && (!brew_file.symlink? || brew_file.readlink.to_s != contents)
+          FileUtils.rm_rf brew_file
+          brew_file.make_symlink contents
+        elsif !symlink && (brew_file.symlink? || !brew_file.file? || brew_file.binread != contents ||
+                           (brew_file.lstat.mode & 07777) != brew_file_mode)
+          FileUtils.rm_rf brew_file
+          brew_file.atomic_write contents
+          brew_file.chmod brew_file_mode
+        end
+      end
+    end
+  end
 
   # Whether to run the given install `step` (e.g. `"building"`) inside
   # Homebrew's sandbox. Warns when it will not: noting reliance on the outer

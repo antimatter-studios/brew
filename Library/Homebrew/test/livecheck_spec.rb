@@ -47,12 +47,6 @@ RSpec.describe Livecheck do
       livecheck_f.formula("other-formula")
       expect(livecheck_f.formula).to eq("other-formula")
     end
-
-    it "raises a TypeError if the argument isn't a String" do
-      expect do
-        livecheck_f.formula(123)
-      end.to raise_error TypeError
-    end
   end
 
   describe "#cask" do
@@ -80,14 +74,14 @@ RSpec.describe Livecheck do
   describe "#skip" do
     it "sets @skip to true when no argument is provided" do
       expect(livecheck_f.skip).to be true
-      expect(livecheck_f.instance_variable_get(:@skip)).to be true
-      expect(livecheck_f.instance_variable_get(:@skip_msg)).to be_nil
+      expect(livecheck_f.skip?).to be true
+      expect(livecheck_f.skip_msg).to be_nil
     end
 
     it "sets @skip to true and @skip_msg to the provided String" do
       expect(livecheck_f.skip("foo")).to be true
-      expect(livecheck_f.instance_variable_get(:@skip)).to be true
-      expect(livecheck_f.instance_variable_get(:@skip_msg)).to eq("foo")
+      expect(livecheck_f.skip?).to be true
+      expect(livecheck_f.skip_msg).to eq("foo")
     end
   end
 

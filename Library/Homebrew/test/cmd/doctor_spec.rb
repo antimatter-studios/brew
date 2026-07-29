@@ -12,6 +12,13 @@ RSpec.describe Homebrew::Cmd::Doctor do
       .to output(/This is an integration test/).to_stderr
   end
 
+  specify "prints json when requested" do
+    cmd = described_class.new(["--json"])
+
+    expect { cmd.run }
+      .to output(/"tier": 1/).to_stdout
+  end
+
   specify "check_missing_deps reports formula and cask dependencies", :cask do
     formula = instance_double(Formula, full_name:            "needs-foo",
                                        missing_dependencies: [instance_double(Dependency, to_s: "foo")])
@@ -25,7 +32,7 @@ RSpec.describe Homebrew::Cmd::Doctor do
     allow(Cask::Caskroom).to receive(:casks).and_return([cask])
     allow(Cask::Tab).to receive(:for_cask).with(cask).and_return(tab)
 
-    expect(Homebrew::Diagnostic::Checks.new.check_missing_deps)
+    expect(Homebrew::Diagnostic::Checks.new.check_missing_deps&.to_s)
       .to include(
         "Some installed formulae or casks are missing dependencies.",
         "brew install foo local-caffeine unar",
@@ -50,11 +57,11 @@ RSpec.describe Homebrew::Cmd::Doctor do
   specify "does not print removed caveats method errors for installed casks", :cask do
     cask = Cask::CaskLoader.load(cask_path("local-caffeine"))
     installer = InstallHelper.install_with_caskfile(cask)
-    installed_caskfile = installer.metadata_subdir/"#{cask.token}.rb"
+    installed_caskfile = installer.metadata_subdir/"#{cask.token}.json"
     expect(installed_caskfile).to exist
 
-    installed_caskfile.write(
-      installed_caskfile.read.sub(
+    (installer.metadata_subdir/"#{cask.token}.rb").write(
+      cask_path("local-caffeine").read.sub(
         /\nend\n\z/,
         <<~RUBY,
             caveats do
@@ -64,6 +71,7 @@ RSpec.describe Homebrew::Cmd::Doctor do
         RUBY
       ),
     )
+    installed_caskfile.unlink
 
     (CoreCaskTap.instance.cask_dir/"local-caffeine.rb").unlink
     CoreCaskTap.instance.clear_cache

@@ -41,6 +41,11 @@ module OS
         Dependency.new(GLIBC, [:implicit])
       end
 
+      sig { returns(T::Hash[String, T::Set[String]]) }
+      def global_dep_tree
+        @@global_dep_tree
+      end
+
       private
 
       GLIBC = "glibc"
@@ -85,6 +90,7 @@ module OS
       def bubblewrap_dependency_needed?
         return false unless ::Homebrew::EnvConfig.sandbox_linux?
         return false if ENV["HOMEBREW_TESTS"]
+        return false if OS::Linux::Sandbox.landlock?
 
         ::Sandbox.executable.blank?
       end
@@ -112,11 +118,6 @@ module OS
       # rubocop:disable Style/ClassVars
       @@global_dep_tree = T.let({}, T::Hash[String, T::Set[String]])
       @@building_global_dep_tree = T.let(false, T::Boolean)
-
-      sig { returns(T::Hash[String, T::Set[String]]) }
-      def global_dep_tree
-        @@global_dep_tree
-      end
 
       sig { void }
       def building_global_dep_tree!

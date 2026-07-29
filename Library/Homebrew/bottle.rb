@@ -1,6 +1,8 @@
 # typed: strict
 # frozen_string_literal: true
 
+require "unpack_strategy"
+
 class Bottle
   include Downloadable
 
@@ -189,11 +191,8 @@ class Bottle
     return unless (resource = github_packages_manifest_resource)
 
     begin
+      # `$HOMEBREW_BOTTLE_DOMAIN` fallback is configured on the resource below.
       resource.fetch(timeout:, quiet:)
-    rescue DownloadError
-      raise unless fallback_on_error?
-
-      retry
     rescue Resource::BottleManifest::Error
       raise if @fetch_tab_retried
 
@@ -236,12 +235,73 @@ class Bottle
     resource.path_exec_files
   end
 
+  sig { returns(T.nilable(T::Hash[String, Object])) }
+  def sbom_supplement
+    resource = github_packages_manifest_resource
+    return unless resource&.downloaded_and_valid?
+
+    resource.sbom_supplement
+  end
+
   sig { returns(Filename) }
   def filename = Filename.new(@name, @pkg_version, @tag, @spec.rebuild)
 
+  sig { returns(Pathname) }
+  def staged_path_from_download_queue
+    bottle_filename = filename
+    HOMEBREW_TEMP_CELLAR/bottle_filename.name/bottle_filename.version.to_s
+  end
+
+  sig { returns(Pathname) }
+  def staged_path_from_download_queue_marker
+    Pathname("#{staged_path_from_download_queue}.poured")
+  end
+
+  sig { override.params(_download: Pathname, pour: T::Boolean).returns(T::Boolean) }
+  def stage_from_download_queue?(_download, pour:)
+    pour
+  end
+
+  sig { override.params(download: Pathname, pour: T::Boolean).void }
+  def stage_from_download_queue(download, pour:)
+    return unless pour
+
+    bottle_tmp_keg = staged_path_from_download_queue
+    bottle_poured_file = staged_path_from_download_queue_marker
+
+    begin
+      HOMEBREW_TEMP_CELLAR.mkpath
+
+      return if bottle_poured_file.exist?
+
+      FileUtils.rm(bottle_poured_file) if bottle_poured_file.symlink?
+      FileUtils.rm_r(bottle_tmp_keg) if bottle_tmp_keg.directory?
+
+      UnpackStrategy.detect(download, prioritize_extension: true)
+                    .extract_nestedly(to: HOMEBREW_TEMP_CELLAR)
+
+      # Create a separate file to mark a completed extraction. This avoids
+      # a potential race condition if a user interrupts the install.
+      # We use a symlink to easily check that both this extra status file
+      # and the real extracted directory exist via `Pathname#exist?`.
+      FileUtils.ln_s(bottle_tmp_keg, bottle_poured_file)
+    # Catch any exception type here to clean up partial queued extractions.
+    rescue Exception # rubocop:disable Lint/RescueException
+      ignore_interrupts do
+        FileUtils.rm_r(bottle_tmp_keg) if bottle_tmp_keg.directory?
+        bottle_tmp_keg.parent.rmdir_if_possible
+      end
+      raise
+    end
+  end
+
   sig { returns(T.nilable(Resource::BottleManifest)) }
   def github_packages_manifest_resource
-    return if @resource.download_strategy != CurlGitHubPackagesDownloadStrategy
+    # `$HOMEBREW_BOTTLE_DOMAIN` may be a legacy flat-file mirror, so its
+    # bottle resource does not necessarily use the GitHub Packages strategy.
+    custom_bottle_domain = Homebrew::EnvConfig.bottle_domain_custom? &&
+                           root_url == Homebrew::EnvConfig.bottle_domain
+    return if @resource.download_strategy != CurlGitHubPackagesDownloadStrategy && !custom_bottle_domain
 
     @github_packages_manifest_resource ||= T.let(
       begin
@@ -255,11 +315,18 @@ class Bottle
 
         image_name = GitHubPackages.image_formula_name(@name)
         image_tag = GitHubPackages.image_version_rebuild(version_rebuild)
+        manifest_path = "#{image_name}/manifests/#{image_tag}"
         resource.url(
-          "#{root_url}/#{image_name}/manifests/#{image_tag}",
+          "#{root_url}/#{manifest_path}",
           using:   CurlGitHubPackagesDownloadStrategy,
           headers: ["Accept: application/vnd.oci.image.index.v1+json"],
         )
+        # Give a legacy mirror the first chance to serve the manifest. Many
+        # contain only bottle archives, so retain GHCR as a fallback. By
+        # contrast, `$HOMEBREW_ARTIFACT_DOMAIN` must provide an OCI registry
+        # proxy for bottle blobs and manifests; the strategy rewrites the GHCR
+        # URL for it.
+        resource.mirror("#{HOMEBREW_BOTTLE_DEFAULT_DOMAIN}/#{manifest_path}") if custom_bottle_domain
         T.cast(resource.downloader, CurlGitHubPackagesDownloadStrategy).resolved_basename =
           "#{name}-#{version_rebuild}.bottle_manifest.json"
         resource
@@ -288,7 +355,7 @@ class Bottle
   def fallback_on_error?
     # Use the default bottle domain as a fallback mirror
     if @resource.url&.start_with?(Homebrew::EnvConfig.bottle_domain) &&
-       Homebrew::EnvConfig.bottle_domain != HOMEBREW_BOTTLE_DEFAULT_DOMAIN
+       Homebrew::EnvConfig.bottle_domain_custom?
       opoo "Bottle missing, falling back to the default domain..."
       root_url(HOMEBREW_BOTTLE_DEFAULT_DOMAIN)
       @github_packages_manifest_resource = T.let(nil, T.nilable(Resource::BottleManifest))

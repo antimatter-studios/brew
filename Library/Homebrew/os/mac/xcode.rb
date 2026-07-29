@@ -5,7 +5,7 @@ module OS
   module Mac
     # Helper module for querying Xcode information.
     module Xcode
-      DEFAULT_BUNDLE_PATH = T.let(Pathname("/Applications/Xcode.app").freeze, ::Pathname)
+      DEFAULT_BUNDLE_PATH = ::Pathname.new("/Applications/Xcode.app").freeze
       BUNDLE_ID = "com.apple.dt.Xcode"
       OLD_BUNDLE_ID = "com.apple.Xcode"
       APPLE_DEVELOPER_DOWNLOAD_URL = "https://developer.apple.com/download/all/"
@@ -187,6 +187,7 @@ module OS
           # Fast path that will probably almost always work unless `xcode-select -p` is misconfigured
           version_plist = T.must(prefix).parent/"version.plist"
           if version_plist.file?
+            require "plist"
             data = Plist.parse_xml(version_plist, marshal: false)
             version = data["CFBundleShortVersionString"] if data
             return version if version

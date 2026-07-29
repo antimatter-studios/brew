@@ -11,6 +11,29 @@ module OS
 
         requires_ancestor { Homebrew::DevCmd::Tests }
 
+        sig { void }
+        def check_test_environment!
+          super
+          return unless Homebrew::EnvConfig.sandbox_linux?
+
+          require "sandbox"
+
+          if OS::Linux::Sandbox.landlock?
+            unless ::Sandbox.available?
+              return if GitHub::Actions.env_set?
+
+              ::Sandbox.ensure_sandbox_available!
+            end
+
+            ::Sandbox.configure!
+          elsif GitHub::Actions.env_set?
+            ::Sandbox.configure!
+          else
+            ::Sandbox.ensure_sandbox_installed!(install_from_tests: true)
+          end
+          ::Sandbox.ensure_sandbox_available!
+        end
+
         private
 
         sig { params(bundle_args: T::Array[String]).returns(T::Array[String]) }
@@ -21,25 +44,6 @@ module OS
         sig { params(files: T::Array[String]).returns(T::Array[String]) }
         def os_files(files)
           non_macos_files(files)
-        end
-
-        sig { void }
-        def check_test_environment!
-          super
-          return unless Homebrew::EnvConfig.sandbox_linux?
-
-          require "sandbox"
-
-          if GitHub::Actions.env_set?
-            ::Sandbox.configure!
-          else
-            ::Sandbox.ensure_sandbox_installed!(install_from_tests: true)
-          end
-          return if ::Sandbox.available?
-
-          reason = ::Sandbox.failure_reason ||
-                   "`HOMEBREW_SANDBOX_LINUX` requires a working rootless Bubblewrap sandbox."
-          raise UsageError, reason
         end
       end
     end

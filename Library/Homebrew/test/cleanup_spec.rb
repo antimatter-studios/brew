@@ -288,9 +288,49 @@ RSpec.describe Homebrew::Cleanup do
         expect(download).not_to exist
       end
 
+      it "removes legacy URL-basename downloads if they are not for the latest version" do
+        download = Cask::Cache.path/"transmission-2.61.dmg--7.8.9.dmg"
+
+        FileUtils.touch download
+
+        cleanup.cleanup_cask(cask)
+
+        expect(download).not_to exist
+      end
+
       it "does not remove downloads for the latest version" do
         download = Cask::Cache.path/"#{cask.token}--#{cask.version}"
 
+        FileUtils.touch download
+
+        cleanup.cleanup_cask(cask)
+
+        expect(download).to exist
+      end
+
+      it "removes legacy URL-basename downloads when the token-named download exists" do
+        legacy_download = Cask::Cache.path/"transmission-2.61.dmg--#{cask.version}.dmg"
+        download = Cask::Cache.path/"#{cask.token}--#{cask.version}.dmg"
+
+        FileUtils.touch legacy_download
+        FileUtils.touch download
+
+        cleanup.cleanup_cask(cask)
+
+        expect([legacy_download.exist?, download.exist?]).to eq([false, true])
+      end
+
+      it "does not remove downloads when the latest version ends with a comma" do
+        version = Cask::DSL::Version.new("7.2,2023.3,")
+        cask = instance_double(Cask::Cask,
+                               token:             "trailing-comma",
+                               version:,
+                               installed_version: version,
+                               url:               nil,
+                               caskroom_path:     Cask::Caskroom.path/"trailing-comma")
+        download = Cask::Cache.path/"#{cask.token}--#{cask.version}.zip"
+
+        allow(Cask::CaskLoader).to receive(:load).with(cask.token, warn: false).and_return(cask)
         FileUtils.touch download
 
         cleanup.cleanup_cask(cask)
@@ -321,6 +361,22 @@ RSpec.describe Homebrew::Cleanup do
         cleanup.cleanup_cask(cask)
 
         expect(download).not_to exist
+      end
+
+      it "removes broken legacy URL-basename downloads" do
+        version = Cask::DSL::Version.new(:latest)
+        cask = instance_double(Cask::Cask,
+                               token:         "latest-cask",
+                               version:,
+                               url:           "file://#{TEST_FIXTURE_DIR}/cask/caffeine.zip",
+                               caskroom_path: Cask::Caskroom.path/"latest-cask")
+        download = Cask::Cache.path/"caffeine.zip--#{version}.zip"
+
+        FileUtils.ln_s Cask::Cache.path/"missing.zip", download
+
+        cleanup.cleanup_cask(cask)
+
+        expect(download).not_to be_a_symlink
       end
     end
   end
@@ -353,6 +409,19 @@ RSpec.describe Homebrew::Cleanup do
   end
 
   describe "::cleanup_cache" do
+    it "removes legacy cask downloads during full cache cleanup", :cask do
+      cask = Cask::CaskLoader.load("local-transmission")
+      download = Cask::Cache.path/"transmission-2.61.dmg--7.8.9.dmg"
+
+      Cask::Cache.path.mkpath
+      FileUtils.touch download
+      allow(Cask::Caskroom).to receive(:casks).and_return([cask])
+
+      cleanup.cleanup_cache
+
+      expect(download).not_to exist
+    end
+
     it "cleans up incomplete downloads" do
       incomplete = (HOMEBREW_CACHE/"something.incomplete")
       incomplete.mkpath
@@ -455,6 +524,67 @@ RSpec.describe Homebrew::Cleanup do
       foo.mkpath
       described_class.new(days: 1).cleanup_cache
       expect(foo).to exist
+    end
+
+    it "does not clean up internal package API files without scrub even when pruning" do
+      api_package_files = [
+        HOMEBREW_CACHE/"api/internal/packages.arm64_golden_gate.jws.json",
+        HOMEBREW_CACHE/"api/internal/packages.arm64_tahoe.jws.json",
+      ]
+      api_package_files.each do |api_package_file|
+        api_package_file.dirname.mkpath
+        FileUtils.touch api_package_file
+      end
+
+      described_class.new(days: 0).cleanup_cache
+
+      expect(api_package_files.map(&:exist?)).to eq([true, true])
+    end
+
+    it "cleans up non-current internal package API files with scrub" do
+      cache = mktmpdir/"cache"
+      api_internal = cache/"api/internal"
+      current_api_package_file = api_internal/Homebrew::API::Internal.cached_packages_json_file_path.basename
+      stale_api_package_file = api_internal/"packages.stale.jws.json"
+      api_package_files = [current_api_package_file, stale_api_package_file]
+      api_jws_files = [
+        cache/"api/formula.jws.json",
+        cache/"api/cask.jws.json",
+      ]
+      api_package_files.each do |api_package_file|
+        api_package_file.dirname.mkpath
+        FileUtils.touch api_package_file
+      end
+      api_jws_files.each do |api_jws_file|
+        api_jws_file.dirname.mkpath
+        FileUtils.touch api_jws_file
+      end
+
+      described_class.new(scrub: true, cache:).cleanup_cache
+
+      expect([*api_package_files, *api_jws_files].map(&:exist?)).to eq([true, false, true, true])
+    end
+
+    it "cleans up non-current internal package API payload sidecars with scrub" do
+      cache = mktmpdir/"cache"
+      api_internal = cache/"api/internal"
+      current_basename = Homebrew::API::Internal.cached_packages_json_file_path.basename
+      kept_files = [
+        api_internal/current_basename,
+        api_internal/"#{current_basename}.payload",
+      ]
+      scrubbed_files = [
+        api_internal/"packages.stale.jws.json.payload",
+        api_internal/"#{current_basename}.payload.tmp",
+      ]
+      (kept_files + scrubbed_files).each do |file|
+        file.dirname.mkpath
+        FileUtils.touch file
+      end
+
+      described_class.new(scrub: true, cache:).cleanup_cache
+
+      expect((kept_files + scrubbed_files).map(&:exist?)).to eq([true, true, false, false])
     end
 
     it "cleans up API source files and symlinks at any depth without cleaning directories" do

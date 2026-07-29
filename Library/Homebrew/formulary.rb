@@ -26,10 +26,7 @@ module Formulary
   extend Utils::Output::Mixin
   include Utils::Output::Mixin
 
-  # Sorbet type members are mutable by design and cannot be frozen.
-  # rubocop:disable Style/MutableConstant
   Cache = type_template { { fixed: T::Hash[String, T.untyped] } }
-  # rubocop:enable Style/MutableConstant
 
   ALLOWED_URL_SCHEMES = %w[file].freeze
   private_constant :ALLOWED_URL_SCHEMES
@@ -58,8 +55,7 @@ module Formulary
   sig {
     returns({
       api:               T.nilable(T::Hash[String, T.class_of(Formula)]),
-      # TODO: the hash values should be Formula instances, but the linux tests were failing
-      formulary_factory: T.nilable(T::Hash[String, T.untyped]),
+      formulary_factory: T.nilable(T::Hash[String, Formula]),
       path:              T.nilable(T::Hash[String, T.class_of(Formula)]),
     })
   }
@@ -273,6 +269,10 @@ module Formulary
               elsif (patch_file = patch_hash.fetch("file", patch_hash[:file]))
                 file patch_file
               end
+
+              if (patch_resolves = patch_hash.fetch("resolves", patch_hash[:resolves]))
+                resolves(*patch_resolves.map { |resolved| resolved.fetch("id", resolved[:id]) })
+              end
             end
           end
 
@@ -304,10 +304,10 @@ module Formulary
 
       if formula_struct.bottle?
         bottle do
-          if Homebrew::EnvConfig.bottle_domain == HOMEBREW_BOTTLE_DEFAULT_DOMAIN
-            root_url HOMEBREW_BOTTLE_DEFAULT_DOMAIN
-          else
+          if Homebrew::EnvConfig.bottle_domain_custom?
             root_url Homebrew::EnvConfig.bottle_domain
+          else
+            root_url HOMEBREW_BOTTLE_DEFAULT_DOMAIN
           end
           rebuild formula_struct.bottle_rebuild
           formula_struct.bottle_checksums.each do |args|
@@ -713,20 +713,16 @@ module Formulary
 
       return unless (name_tap_type = Formulary.tap_formula_name_type(ref, warn:))
 
-      loader_from_name_tap_type(ref, name_tap_type)
+      loader_from_name_tap_type(name_tap_type)
     end
 
     sig {
-      params(ref: String, name_tap_type: [String, Tap, T.nilable(Symbol)]).returns(T.nilable(T.attached_class))
+      params(name_tap_type: [String, Tap, T.nilable(Symbol), T.nilable(String)])
+        .returns(T.nilable(T.attached_class))
     }
-    def self.loader_from_name_tap_type(ref, name_tap_type)
-      name, tap, type = name_tap_type
+    def self.loader_from_name_tap_type(name_tap_type)
+      name, tap, type, alias_name = name_tap_type
       path = Formulary.find_formula_in_tap(name, tap)
-
-      if type == :alias
-        # TODO: Simplify this by making `tap_formula_name_type` return the alias name.
-        alias_name = T.must(ref[HOMEBREW_TAP_FORMULA_REGEX, :name]).downcase
-      end
 
       if type == :migration && tap.core_tap? && (loader = FromAPILoader.try_new(name))
         T.cast(loader, T.attached_class)
@@ -797,7 +793,7 @@ module Formulary
                "#{migrated_tap.core_tap? ? migrated_name : "#{migrated_tap}/#{migrated_name}"}."
         end
 
-        if (core_loader = loader_from_name_tap_type("#{core_tap}/#{name}", name_tap_type))&.path&.exist?
+        if (core_loader = loader_from_name_tap_type(name_tap_type))&.path&.exist?
           return core_loader
         end
       end
@@ -913,21 +909,17 @@ module Formulary
       return if Homebrew::EnvConfig.no_install_from_api?
       return unless ref.is_a?(String)
       return unless (name = ref[HOMEBREW_DEFAULT_TAP_FORMULA_REGEX, :name])
-      if Homebrew::API.formula_names.exclude?(name) &&
+      if !Homebrew::API.formula_name?(name) &&
          !Homebrew::API.formula_aliases.key?(name) &&
          !Homebrew::API.formula_renames.key?(name)
         return
       end
 
-      alias_name = name
-
       ref = "#{CoreTap.instance}/#{name}"
 
       return unless (name_tap_type = Formulary.tap_formula_name_type(ref, warn:))
 
-      name, tap, type = name_tap_type
-
-      alias_name = (type == :alias) ? alias_name.downcase : nil
+      name, tap, _type, alias_name = name_tap_type
 
       new(name, tap:, alias_name:)
     end
@@ -1171,18 +1163,23 @@ module Formulary
     loader_for(ref).path
   end
 
-  sig { params(tapped_name: String, warn: T::Boolean).returns(T.nilable([String, Tap, T.nilable(Symbol)])) }
+  sig {
+    params(tapped_name: String, warn: T::Boolean)
+      .returns(T.nilable([String, Tap, T.nilable(Symbol), T.nilable(String)]))
+  }
   def self.tap_formula_name_type(tapped_name, warn:)
     return unless (tap_with_name = Tap.with_formula_name(tapped_name))
 
     tap, name = tap_with_name
 
     type = nil
+    alias_name = nil
 
     # FIXME: Remove the need to do this here.
     alias_table_key = tap.core_tap? ? name : "#{tap}/#{name}"
 
     if (possible_alias = tap.alias_table[alias_table_key].presence)
+      alias_name = name
       # FIXME: Remove the need to split the name and instead make
       #        the alias table only contain short names.
       name = Utils.name_from_full_name(possible_alias)
@@ -1219,11 +1216,11 @@ module Formulary
     if warn && old_name && new_name
       destination_exists = find_formula_in_tap(name, tap).exist? ||
                            (tap.core_tap? && !Homebrew::EnvConfig.no_install_from_api? &&
-                            Homebrew::API.formula_names.include?(name))
+                            Homebrew::API.formula_name?(name))
       opoo "Formula #{old_name} was renamed to #{new_name}." if destination_exists
     end
 
-    [name, tap, type]
+    [name, tap, type, alias_name]
   end
 
   sig { params(ref: T.any(String, Pathname), from: T.nilable(Symbol), warn: T::Boolean).returns(FormulaLoader) }
@@ -1258,6 +1255,14 @@ module Formulary
       name
     else
       "#{name}.rb"
+    end
+
+    # For API-known formulae the sharded path can be computed directly,
+    # avoiding building a map of ~8500 `Pathname`s for a single lookup.
+    # Only use already-loaded API data to avoid triggering downloads here.
+    if tap.is_a?(CoreTap) && !Homebrew::EnvConfig.no_install_from_api? &&
+       Homebrew::API::Internal.formula_hashes_cached? && Homebrew::API.formula_name?(name)
+      return tap.formula_dir/tap.new_formula_subdirectory(name)/"#{name.downcase}.rb"
     end
 
     tap.formula_files_by_name.fetch(name, tap.formula_dir/filename)

@@ -137,6 +137,17 @@ module Commands
     cmds.sort
   end
 
+  sig { params(cmd: String).returns(String) }
+  def self.suggestion_message(cmd)
+    require "did_you_mean"
+
+    suggestions = DidYouMean::SpellChecker.new(dictionary: commands(external: false, aliases: true)).correct(cmd)
+    suggestions = DidYouMean::SpellChecker.new(dictionary: commands(aliases: true)).correct(cmd) if suggestions.empty?
+    return "" if suggestions.empty?
+
+    "\nDid you mean #{suggestions.to_sentence(two_words_connector: " or ", last_word_connector: " or ")}?"
+  end
+
   # An array of all tap cmd directory {Pathname}s.
   sig { returns(T::Array[Pathname]) }
   def self.tap_cmd_directories
@@ -242,7 +253,7 @@ module Commands
     return if command == "help"
 
     path = self.path(command)
-    return if path.blank?
+    return unless path
 
     if (cmd_parser = Homebrew::CLI::Parser.from_cmd_path(path))
       processed_options = if subcommand.nil? && cmd_parser.subcommands.present?
@@ -275,7 +286,7 @@ module Commands
   sig { params(command: String, short: T::Boolean).returns(T.nilable(String)) }
   def self.command_description(command, short: false)
     path = self.path(command)
-    return if path.blank?
+    return unless path
 
     if (cmd_parser = Homebrew::CLI::Parser.from_cmd_path(path))
       if short
@@ -305,7 +316,7 @@ module Commands
   sig { params(command: String).returns(T::Array[Homebrew::CLI::Parser::Subcommand]) }
   def self.command_subcommands(command)
     path = self.path(command)
-    return [] if path.blank?
+    return [] unless path
 
     cmd_parser = Homebrew::CLI::Parser.from_cmd_path(path)
     return [] if cmd_parser.blank?
@@ -319,7 +330,7 @@ module Commands
   }
   def self.named_args_type(command, subcommand: nil)
     path = self.path(command)
-    return if path.blank?
+    return unless path
 
     cmd_parser = Homebrew::CLI::Parser.from_cmd_path(path)
     return if cmd_parser.blank?
@@ -336,7 +347,7 @@ module Commands
   sig { params(command: String, option: String).returns(T.nilable(T::Array[String])) }
   def self.option_conflicts(command, option)
     path = self.path(command)
-    return if path.blank?
+    return unless path
 
     cmd_parser = Homebrew::CLI::Parser.from_cmd_path(path)
     return if cmd_parser.blank?

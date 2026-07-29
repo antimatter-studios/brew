@@ -5,6 +5,7 @@ require "concurrent/executors"
 require "concurrent/promises"
 require "monitor"
 require "utils"
+require "utils/tty"
 require "bundle/package_types"
 
 module Homebrew
@@ -48,6 +49,23 @@ module Homebrew
         end
         ::Tap.clear_cache if tap_entries.present?
 
+        require "tap"
+        installed_taps = Homebrew::Bundle::Tap.installed_taps
+        pending_entries.each do |entry|
+          tap_with_name = if entry.cls == Homebrew::Bundle::Brew
+            ::Tap.with_formula_name(entry.full_name)
+          elsif entry.cls == Homebrew::Bundle::Cask
+            ::Tap.with_cask_token(entry.full_name)
+          end
+          next unless tap_with_name
+
+          tap = tap_with_name.first
+          next if installed_taps.include?(tap.name) || tap_entries.any? { |tap_entry| tap_entry.name == tap.name }
+
+          tap.ensure_installed!
+          installed_taps << tap.name
+        end
+
         prepare_attestation_verification!(pending_entries)
         dependency_map = build_dependency_map(pending_entries)
         completed = T.let(Set.new, T::Set[String])
@@ -83,8 +101,6 @@ module Homebrew
         @pool.shutdown
         @pool.wait_for_termination
       end
-
-      private
 
       sig { params(entries: T::Array[Installer::InstallableEntry]).returns(T::Hash[String, T::Set[String]]) }
       def build_dependency_map(entries)
@@ -158,6 +174,21 @@ module Homebrew
           map[entry.name] = depends_on
         end
       end
+
+      sig { params(message: String, stream: IO).void }
+      def write_output(message, stream: $stdout)
+        @output_mutex.synchronize do
+          # Interactive installers can leave ONLCR disabled, so use CRLF to
+          # ensure terminal status output returns to column 0.
+          if stream.tty?
+            stream.write(message, "\r\n")
+          else
+            stream.puts(message)
+          end
+        end
+      end
+
+      private
 
       sig { params(name: String).returns(String) }
       def normalize_formula_name(name)
@@ -268,14 +299,11 @@ module Homebrew
         end
       end
 
-      sig { params(message: String, stream: IO).void }
-      def write_output(message, stream: $stdout)
-        @output_mutex.synchronize { stream.puts(message) }
-      end
-
       sig { void }
       def clear_tty_line
-        File.open("/dev/tty", "w") { |f| f.print("\r\e[K") }
+        File.open("/dev/tty", "w") do |f|
+          f.print("#{Tty.begin_synchronized_update}\r\e[K#{Tty.end_synchronized_update}")
+        end
       rescue Errno::ENXIO, Errno::ENOENT, Errno::EACCES, Errno::EPERM
         # No TTY available (CI, piped output) - nothing to clean up.
         nil

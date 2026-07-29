@@ -95,10 +95,7 @@ class Formula
   extend T::Helpers
   extend Utils::Output::Mixin
 
-  # Sorbet type members are mutable by design and cannot be frozen.
-  # rubocop:disable Style/MutableConstant
   Cache = type_template { { fixed: T::Hash[Symbol, T.untyped] } }
-  # rubocop:enable Style/MutableConstant
 
   abstract!
 
@@ -153,7 +150,7 @@ class Formula
   #
   # @api public
   sig { returns(T.nilable(Tap)) }
-  attr_reader :tap
+  attr_accessor :tap
 
   # The stable (and default) {SoftwareSpec} for this {Formula}.
   # This contains all the attributes (e.g. URL, checksum) that apply to the
@@ -178,8 +175,6 @@ class Formula
   # @see #determine_active_spec
   sig { returns(SoftwareSpec) }
   attr_reader :active_spec
-
-  protected :active_spec
 
   # A symbol to indicate currently active {SoftwareSpec}.
   # It's either `:stable` or `:head`.
@@ -218,7 +213,7 @@ class Formula
   #
   # @api public
   sig { returns(T.nilable(Pathname)) }
-  attr_reader :buildpath
+  attr_accessor :buildpath
 
   # The current working directory during tests.
   # Will only be non-`nil` inside {.test}.
@@ -268,6 +263,7 @@ class Formula
   def initialize(name, path, spec, alias_path: nil, tap: nil, force_bottle: false)
     # Only allow instances of subclasses. The base class does not hold any spec information (URLs etc).
     raise "Do not call `Formula.new' directly without a subclass." unless self.class < Formula
+    raise "Formula subclasses cannot override `brew`." if self.class.instance_method(:brew).owner != Formula
 
     # Stop any subsequent modification of a formula's definition.
     # Changes do not propagate to existing instances of formulae.
@@ -315,7 +311,6 @@ class Formula
     @prefix_returns_versioned_prefix = T.let(false, T.nilable(T::Boolean))
     @oldname_locks = T.let([], T::Array[FormulaLock])
     @on_system_blocks_exist = T.let(false, T::Boolean)
-    @fully_loaded_formula = T.let(nil, T.nilable(Formula))
   end
 
   sig { params(spec_sym: Symbol).void }
@@ -499,7 +494,7 @@ class Formula
 
     return @unresolved_path if @unresolved_path.exist?
 
-    return local_bottle_path if local_bottle_path.presence&.exist?
+    return local_bottle_path if local_bottle_path&.exist?
 
     alias_path || @unresolved_path
   end
@@ -578,6 +573,11 @@ class Formula
   # @!method homepage
   # @see .homepage
   delegate homepage: :"self.class"
+
+  # The date when a human last browsed the homepage.
+  # @!method homepage_browsed
+  # @see .homepage_browsed
+  delegate homepage_browsed: :"self.class"
 
   # The `livecheck` specification for the software.
   # @!method livecheck
@@ -875,14 +875,17 @@ class Formula
   # @api internal
   sig { returns(T::Array[String]) }
   def oldnames
-    @oldnames ||= T.let(
-      if (tap = self.tap)
-        Tap.tap_migration_oldnames(tap, name) + tap.formula_reverse_renames.fetch(name, [])
-      else
-        []
-      end, T.nilable(T::Array[String])
-    )
+    @oldnames ||= T.let(nil, T.nilable(T::Array[String]))
+    @oldnames ||= if (tap = self.tap)
+      oldnames = Tap.tap_migration_oldnames(tap, name) + tap.formula_reverse_renames.fetch(name, [])
+      oldnames.reject { |oldname| Utils.name_from_full_name(oldname) == name }
+    else
+      []
+    end
   end
+
+  sig { params(oldnames: T.nilable(T::Array[String])).void }
+  attr_writer :oldnames
 
   # All aliases for the formula.
   #
@@ -962,9 +965,7 @@ class Formula
   def linked_keg
     linked_keg = possible_names.map { |name| HOMEBREW_LINKED_KEGS/name }
                                .find(&:directory?)
-    return linked_keg if linked_keg.present?
-
-    HOMEBREW_LINKED_KEGS/name
+    linked_keg || (HOMEBREW_LINKED_KEGS/name)
   end
 
   sig { returns(T.nilable(PkgVersion)) }
@@ -1585,16 +1586,6 @@ class Formula
   sig { returns(T::Boolean) }
   def post_install_steps_defined? = self.class.post_install_steps_defined?
 
-  sig { returns(T::Boolean) }
-  def post_install_steps_conflict?
-    post_install_steps_defined? && post_install_defined?
-  end
-
-  sig { void }
-  def warn_on_post_install_steps_conflict
-    opoo "#{full_name}: `post_install` is ignored because `post_install_steps` are defined!"
-  end
-
   sig { void }
   def install_etc_var
     etc_var_dirs = [bottle_prefix/"etc", bottle_prefix/"var"]
@@ -1612,6 +1603,7 @@ class Formula
   def run_post_install_steps
     return if post_install_steps.empty?
 
+    prefix_returns_versioned_prefix = @prefix_returns_versioned_prefix
     @prefix_returns_versioned_prefix = T.let(true, T.nilable(T::Boolean))
 
     begin
@@ -1619,7 +1611,7 @@ class Formula
         Homebrew::InstallSteps::Runner.new(context: self).run(post_install_steps)
       end
     ensure
-      @prefix_returns_versioned_prefix = T.let(false, T.nilable(T::Boolean))
+      @prefix_returns_versioned_prefix = prefix_returns_versioned_prefix
     end
   end
 
@@ -1653,7 +1645,8 @@ class Formula
           ENV.activate_extensions!
 
           with_logging("post_install") do
-            post_install
+            run_post_install_steps if post_install_steps_defined?
+            post_install if post_install_defined?
           end
         end
       end
@@ -2074,15 +2067,18 @@ class Formula
   # Standard parameters for Cabal-v2 builds.
   #
   # @api public
-  sig { returns(T::Array[String]) }
-  def std_cabal_v2_args
+  # @param installdir directory for `--installdir`. Set to false if using v2-configure or v2-build
+  sig { params(installdir: T.any(String, Pathname, FalseClass)).returns(T::Array[String]) }
+  def std_cabal_v2_args(installdir: bin)
     # cabal-install's dependency-resolution backtracking strategy can
     # easily need more than the default 2,000 maximum number of
     # "backjumps," since Hackage is a fast-moving, rolling-release
     # target. The highest known needed value by a formula was 43,478
     # for git-annex, so 100,000 should be enough to avoid most
     # gratuitous backjumps build failures.
-    ["--jobs=#{ENV.make_jobs}", "--max-backjumps=100000", "--install-method=copy", "--installdir=#{bin}"]
+    args = ["--jobs=#{ENV.make_jobs}", "--max-backjumps=100000"]
+    args += ["--install-method=copy", "--installdir=#{installdir}"] if installdir
+    args
   end
 
   # Standard parameters for Cargo builds.
@@ -2125,6 +2121,7 @@ class Formula
       -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=#{HOMEBREW_LIBRARY_PATH}/cmake/trap_fetchcontent_provider.cmake
       -Wno-dev
       -DBUILD_TESTING=OFF
+      -DCCACHE_FOUND=OFF
     ]
   end
 
@@ -2144,20 +2141,50 @@ class Formula
 
   # Standard parameters for Go builds.
   #
+  # ### Example
+  #
+  # A special `ldflags` value of `:goreleaser` will output ldflags similar to GoReleaser's
+  # defaults listed at https://goreleaser.com/customization/builds/builders/go/#options.
+  # This uses formula metadata so it should not be used inside staged resources.
+  #
+  # ```ruby
+  # std_go_args(ldflags: :goreleaser)
+  # ```
+  #
   # @api public
   sig {
     params(
       output:  T.any(String, Pathname),
-      ldflags: T.nilable(T.any(String, T::Array[String])),
+      ldflags: T.nilable(T.any(String, T::Array[String], Symbol)),
       gcflags: T.nilable(T.any(String, T::Array[String])),
       tags:    T.nilable(T.any(String, T::Array[String])),
     ).returns(T::Array[String])
   }
   def std_go_args(output: bin/name, ldflags: nil, gcflags: nil, tags: nil)
+    case ldflags
+    when :goreleaser
+      # If building from a git archive, we use the tap owner as a placeholder.
+      # This can help upstream identify the exact code that was used in binary.
+      built_by = tap&.user || "Homebrew"
+      repo = buildpath
+      commit = Utils.git_head(repo, safe: false) if repo
+      commit ||= built_by
+      ldflags = %W[
+        -X 'main.version=#{version}'
+        -X 'main.commit=#{commit}'
+        -X 'main.date=#{time.iso8601}'
+        -X 'main.builtBy=#{built_by}'
+      ]
+    when Symbol
+      raise ArgumentError, "Invalid ldflags: #{ldflags.inspect}"
+    end
+
+    ldflags = ["-s", "-w"].concat(Array(ldflags)) unless ENV.debug_symbols?
+
     args = ["-trimpath", "-o=#{output}"]
-    args += ["-tags=#{Array(tags).join(" ")}"] if tags
-    args += ["-ldflags=#{Array(ldflags).join(" ")}"] if ldflags
-    args += ["-gcflags=#{Array(gcflags).join(" ")}"] if gcflags
+    args << "-tags=#{Array(tags).join(",")}" if tags
+    args << "-ldflags=#{Array(ldflags).join(" ")}" if ldflags
+    args << "-gcflags=#{Array(gcflags).join(" ")}" if gcflags
     args
   end
 
@@ -2171,8 +2198,8 @@ class Formula
 
   # Standard parameters for npm builds.
   #
-  # @param prefix [String, Pathname, false] installation prefix (default: libexec)
-  # @param ignore_scripts [Boolean] whether to add --ignore-scripts flag (default: true)
+  # @param prefix installation prefix
+  # @param ignore_scripts whether to add --ignore-scripts flag
   # @api public
   sig { params(prefix: T.any(String, Pathname, FalseClass), ignore_scripts: T::Boolean).returns(T::Array[String]) }
   def std_npm_args(prefix: libexec, ignore_scripts: true)
@@ -2194,7 +2221,7 @@ class Formula
     args = ["--verbose", "--no-deps", "--no-binary=:all:", "--ignore-installed", "--no-compile"]
     # Delay packages published in the last day so builds are less likely to
     # install a freshly compromised PyPI release.
-    args << "--uploaded-prior-to=#{(Time.now.utc - Homebrew::RELEASE_COOLDOWN_SECONDS).iso8601(0)}"
+    args << "--uploaded-prior-to=P#{Homebrew::RELEASE_COOLDOWN_DAYS}D"
     args << "--prefix=#{prefix}" if prefix
     args << "--no-build-isolation" unless build_isolation
     args
@@ -3677,6 +3704,27 @@ class Formula
     T.must(bottle).tab_attributes
   end
 
+  # Common environment variables used by sandboxed build, test and postinstall phases.
+  sig { params(home: Pathname).returns(T::Hash[Symbol, String]) }
+  def common_sandbox_env(home)
+    {
+      _JAVA_OPTIONS:           "-Duser.home=#{HOMEBREW_CACHE}/java_cache",
+      GOCACHE:                 "#{HOMEBREW_CACHE}/go_cache",
+      GIT_CONFIG_GLOBAL:       Utils::Git.no_global_config_file,
+      GIT_TERMINAL_PROMPT:     "0",
+      GOENV:                   "off",
+      GOPATH:                  "#{HOMEBREW_CACHE}/go_mod_cache",
+      CARGO_HOME:              "#{HOMEBREW_CACHE}/cargo_cache",
+      BUNDLE_COOLDOWN:         Homebrew::RELEASE_COOLDOWN_DAYS.to_s,
+      PIP_CACHE_DIR:           "#{HOMEBREW_CACHE}/pip_cache",
+      PIP_CONFIG_FILE:         File::NULL,
+      NPM_CONFIG_USERCONFIG:   File::NULL,
+      CURL_HOME:               ENV.fetch("CURL_HOME") { home.to_s },
+      PYTHONDONTWRITEBYTECODE: "1",
+      XDG_CONFIG_HOME:         "#{home}/.config",
+    }
+  end
+
   private
 
   sig { void }
@@ -3721,27 +3769,6 @@ class Formula
     end
     puts "Failed to execute: #{cmd}"
     exit! 1 # never gets here unless exec threw or failed
-  end
-
-  # Common environment variables used by sandboxed build, test and postinstall phases.
-  sig { params(home: Pathname).returns(T::Hash[Symbol, String]) }
-  def common_sandbox_env(home)
-    {
-      _JAVA_OPTIONS:           "-Duser.home=#{HOMEBREW_CACHE}/java_cache",
-      GOCACHE:                 "#{HOMEBREW_CACHE}/go_cache",
-      GIT_CONFIG_GLOBAL:       Utils::Git.no_global_config_file,
-      GIT_TERMINAL_PROMPT:     "0",
-      GOENV:                   "off",
-      GOPATH:                  "#{HOMEBREW_CACHE}/go_mod_cache",
-      CARGO_HOME:              "#{HOMEBREW_CACHE}/cargo_cache",
-      BUNDLE_COOLDOWN:         Homebrew::RELEASE_COOLDOWN_DAYS.to_s,
-      PIP_CACHE_DIR:           "#{HOMEBREW_CACHE}/pip_cache",
-      PIP_CONFIG_FILE:         File::NULL,
-      NPM_CONFIG_USERCONFIG:   File::NULL,
-      CURL_HOME:               ENV.fetch("CURL_HOME") { home.to_s },
-      PYTHONDONTWRITEBYTECODE: "1",
-      XDG_CONFIG_HOME:         "#{home}/.config",
-    }
   end
 
   sig { params(interactive: T::Boolean, debug_symbols: T::Boolean, _block: T.proc.params(arg0: Mktemp).void).void }
@@ -3801,6 +3828,7 @@ class Formula
         @loaded_from_internal_api = T.let(false, T.nilable(T::Boolean))
         @api_source = T.let(nil, T.nilable(T::Hash[String, T.untyped]))
         @on_system_blocks_exist = T.let(false, T.nilable(T::Boolean))
+        @homepage_browsed = T.let(nil, T.nilable(Date))
         @network_access_allowed = T.let(SUPPORTED_NETWORK_ACCESS_PHASES.to_h do |phase|
           [phase, DEFAULT_NETWORK_ACCESS_ALLOWED]
         end, T.nilable(T::Hash[Symbol, T::Boolean]))
@@ -3910,7 +3938,7 @@ class Formula
     # ]
     # ```
     #
-    # @see https://docs.brew.sh/License-Guidelines Homebrew License Guidelines
+    # @see https://docs.brew.sh/Licence-Guidelines Homebrew Licence Guidelines
     # @see https://spdx.github.io/spdx-spec/latest/annexes/spdx-license-expressions/ SPDX license expression guide
     # @api public
     sig {
@@ -4016,7 +4044,14 @@ class Formula
     # ```
     #
     # @api public
-    sig { params(steps: T.untyped, block: T.nilable(T.proc.void)).returns(Homebrew::InstallSteps::Steps) }
+    sig {
+      params(
+        steps: Homebrew::InstallSteps::RawStep,
+        block: T.nilable(T.proc.bind(Homebrew::InstallSteps::DSL).void),
+      ).returns(
+        Homebrew::InstallSteps::Steps,
+      )
+    }
     def post_install_steps(*steps, &block)
       current_steps = @post_install_steps || []
       return current_steps if steps.empty? && block.nil?
@@ -4044,14 +4079,27 @@ class Formula
     # ### Example
     #
     # ```ruby
-    # homepage "https://www.example.com"
+    # homepage "https://www.example.com", browsed: "2026-07-26"
     # ```
     #
+    # `browsed` is the date when a human last checked the homepage in a browser.
+    # Automated homepage availability audits are skipped for one year.
+    #
     # @api public
-    sig { params(val: String).returns(T.nilable(String)) }
-    def homepage(val = T.unsafe(nil))
-      val.nil? ? @homepage : @homepage = T.let(val, T.nilable(String))
+    sig { params(val: String, browsed: T.nilable(String)).returns(T.nilable(String)) }
+    def homepage(val = T.unsafe(nil), browsed: nil)
+      if val.nil?
+        raise ArgumentError, "`browsed` requires a homepage URL" if browsed
+
+        return @homepage
+      end
+
+      @homepage_browsed = Date.parse(browsed) if browsed
+      @homepage = T.let(val, T.nilable(String))
     end
+
+    sig { returns(T.nilable(Date)) }
+    attr_reader :homepage_browsed
 
     # Checks whether a `livecheck` specification is defined or not.
     #
@@ -4289,7 +4337,7 @@ class Formula
     # ```
     #
     # @api public
-    sig { params(block: T.nilable(T.proc.void)).returns(T.untyped) }
+    sig { params(block: T.nilable(T.proc.bind(SoftwareSpec).void)).returns(T.untyped) }
     def stable(&block)
       return T.must(@stable) unless block
 
@@ -4322,8 +4370,13 @@ class Formula
     #
     # @api public
     sig {
-      params(val: T.nilable(String), specs: T::Hash[Symbol, T.untyped], block: T.nilable(T.proc.void))
-        .returns(T.untyped)
+      params(
+        val:   T.nilable(String),
+        specs: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.bind(SoftwareSpec).void),
+      ).returns(
+        T.untyped,
+      )
     }
     def head(val = nil, specs = {}, &block)
       if block
@@ -4578,7 +4631,11 @@ class Formula
     # @see https://docs.brew.sh/Formula-Cookbook#patches Patches
     # @api public
     sig {
-      params(strip: T.any(String, Symbol), src: T.nilable(T.any(String, Symbol)), block: T.nilable(T.proc.void)).void
+      params(
+        strip: T.any(String, Symbol),
+        src:   T.nilable(T.any(String, Symbol)),
+        block: T.nilable(T.proc.bind(Resource::Patch).void),
+      ).void
     }
     def patch(strip = :p1, src = nil, &block)
       specs.each { |spec| spec.patch(strip, src, &block) }
@@ -4833,11 +4890,17 @@ class Formula
     # ```
     #
     # @api public
-    sig { params(block: T.nilable(T.proc.returns(T.untyped))).returns(T.nilable(T.proc.returns(T.untyped))) }
+    sig {
+      params(
+        block: T.nilable(T.proc.bind(Homebrew::Service).void),
+      ).returns(
+        T.nilable(T.proc.void),
+      )
+    }
     def service(&block)
       return @service_block unless block
 
-      @service_block = T.let(block, T.nilable(T.proc.returns(T.untyped)))
+      @service_block = T.let(block, T.nilable(T.proc.void))
     end
 
     # Defines whether the {Formula}'s bottle can be used on the given Homebrew
@@ -4868,7 +4931,7 @@ class Formula
     sig {
       params(
         only_if: T.nilable(Symbol),
-        block:   T.nilable(T.proc.params(arg0: T.untyped).returns(T.any(T::Boolean, Symbol))),
+        block:   T.nilable(T.proc.bind(PourBottleCheck).params(arg0: T.untyped).void),
       ).void
     }
     def pour_bottle?(only_if: nil, &block)
@@ -4879,7 +4942,7 @@ class Formula
         raise ArgumentError, "Do not pass both a preset condition and a block to `pour_bottle?`"
       end
 
-      block ||= case only_if
+      bottle_check_block = block || case only_if
       when :clt_installed
         lambda do |_|
           on_macos do
@@ -4906,7 +4969,7 @@ class Formula
         raise ArgumentError, "Invalid preset `pour_bottle?` condition" if only_if.present?
       end
 
-      @pour_bottle_check.instance_eval(&T.unsafe(block))
+      @pour_bottle_check.instance_eval(&T.unsafe(bottle_check_block))
     end
 
     # Deprecates a {Formula} (on the given date) so a warning is

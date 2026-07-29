@@ -16,6 +16,14 @@ module SharedAudits
   @pull_request_author_computed = T.let(false, T::Boolean)
   @self_submission_cache = T.let({}, T::Hash[String, T::Boolean])
 
+  sig { params(browsed: T.nilable(Date)).returns(T::Boolean) }
+  def self.homepage_browsed_recently?(browsed)
+    return false unless browsed
+
+    today = Date.today
+    browsed <= today && browsed.next_year > today
+  end
+
   sig { returns(T.nilable(String)) }
   def self.pull_request_author
     return @pull_request_author if @pull_request_author_computed
@@ -143,7 +151,7 @@ module SharedAudits
   def self.forgejo_repo_data(user, repo)
     @forgejo_repo_data ||= T.let({}, T.nilable(T::Hash[String, T.untyped]))
     @forgejo_repo_data["#{user}/#{repo}"] ||= begin
-      result = Utils::Curl.curl_output("https://codeberg.org/api/v1/repos/#{user}/#{repo}")
+      result = Utils::Curl.curl_output("https://codeberg.org/api/v1/repos/#{user}/#{repo}", "--fail")
 
       JSON.parse(result.stdout) if result.status.success?
     end

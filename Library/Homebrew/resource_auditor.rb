@@ -61,7 +61,7 @@ module Homebrew
       @using    = T.let(resource.using, T.nilable(T.any(T::Class[AbstractDownloadStrategy], Symbol)))
       @specs    = T.let(resource.specs, T::Hash[Symbol, T.untyped])
       @owner    = T.let(resource.owner, T.nilable(T.any(Cask::Cask, Resource::Owner)))
-      @spec_name = T.let(spec_name, Symbol)
+      @spec_name = spec_name
       @online    = online
       @strict    = strict
       @only      = only
@@ -281,7 +281,7 @@ module Homebrew
       return unless url.to_s.end_with?(".git")
       return unless Utils::Git.remote_exists?(url.to_s)
 
-      detected_branch = Utils.popen_read("git", "ls-remote", "--symref", url.to_s, "HEAD")
+      detected_branch = Utils.popen_read("git", "ls-remote", "--symref", "--end-of-options", url.to_s, "HEAD")
                              .match(%r{ref: refs/heads/(.*?)\s+HEAD})&.to_a&.second
 
       if specs[:branch].blank?

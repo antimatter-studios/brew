@@ -1,7 +1,8 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 require "install_steps"
+require "cask/quarantine"
 
 RSpec.describe Homebrew::InstallSteps do
   let(:root) { Pathname(TEST_TMPDIR)/"install-steps" }
@@ -9,6 +10,8 @@ RSpec.describe Homebrew::InstallSteps do
     root_path = root
     Class.new do
       define_method(:prefix) { root_path/"prefix" }
+      define_method(:bin) { root_path/"prefix/bin" }
+      define_method(:libexec) { root_path/"prefix/libexec" }
       define_method(:var) { root_path/"var" }
       define_method(:staged_path) { root_path/"stage" }
     end.new
@@ -20,6 +23,12 @@ RSpec.describe Homebrew::InstallSteps do
 
   after do
     FileUtils.rm_rf root
+  end
+
+  around do |example|
+    with_env(HOMEBREW_GITHUB_ACTIONS: nil) do
+      example.run
+    end
   end
 
   specify "runs mkdir, touch, move and symlink steps", :aggregate_failures do
@@ -41,6 +50,22 @@ RSpec.describe Homebrew::InstallSteps do
     expect(root/"stage/move-target").to exist
     expect(root/"stage/linked-target").to be_a_symlink
     expect((root/"stage/linked-target").readlink).to eq(Pathname("move-target"))
+  end
+
+  specify "links every source matched by a glob into a directory", :aggregate_failures do
+    steps = Homebrew::InstallSteps::DSL.build(default_source_base: :prefix,
+                                              default_target_base: :prefix) do
+      symlink "share/man/*.1", "share/man/man1", force: true, source_glob: true
+    end
+
+    (root/"prefix/share/man/man1").mkpath
+    (root/"prefix/share/man/tool.1").write "tool"
+    (root/"prefix/share/man/other.1").write "other"
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect(root/"prefix/share/man/man1/tool.1").to be_a_symlink
+    expect(root/"prefix/share/man/man1/other.1").to be_a_symlink
   end
 
   specify "runs mkdir without creating parent directories" do
@@ -85,13 +110,52 @@ RSpec.describe Homebrew::InstallSteps do
           path: "nested/example",
         },
       },
+      {
+        type:                 :delete_keychain_certificate,
+        name:                 "NodeMITMProxyCA",
+        matching_certificate: "~/Library/Application Support/betwixt/ssl/certs/ca.pem",
+      },
+      {
+        type:        :set_permissions,
+        paths:       ["Example.app"],
+        permissions: "0755",
+      },
+      {
+        type:  :set_ownership,
+        paths: [{ base: :staged_path, path: "Example.app" }],
+        user:  :root,
+        group: :wheel,
+      },
     ]
 
     expect(Homebrew::InstallSteps::DSL.normalise_steps(steps)).to contain_exactly(
-      "type" => "mkdir_p",
-      "path" => {
-        "base" => "var",
-        "path" => "nested/example",
+      {
+        "type" => "mkdir_p",
+        "path" => {
+          "base" => "var",
+          "path" => "nested/example",
+        },
+      },
+      {
+        "type"                 => "delete_keychain_certificate",
+        "name"                 => "NodeMITMProxyCA",
+        "matching_certificate" => {
+          "path" => "~/Library/Application Support/betwixt/ssl/certs/ca.pem",
+        },
+      },
+      {
+        "type"        => "set_permissions",
+        "paths"       => [{ "path" => "Example.app" }],
+        "permissions" => "0755",
+      },
+      {
+        "type"  => "set_ownership",
+        "paths" => [{
+          "base" => "staged_path",
+          "path" => "Example.app",
+        }],
+        "user"  => "root",
+        "group" => "wheel",
       },
     )
   end
@@ -121,6 +185,18 @@ RSpec.describe Homebrew::InstallSteps do
     expect(written).to include("literal = {{unknown}} {single}")
   end
 
+  specify "expands formula and cask identity tokens" do
+    context.define_singleton_method(:name) { "example-formula" }
+    context.define_singleton_method(:token) { "example-cask" }
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      write "identity", "#{formula_name}:#{token}"
+    end
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect((root/"var/identity").read).to eq("example-formula:example-cask\n")
+  end
+
   specify "writes a default config file and preserves existing ones", :aggregate_failures do
     steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
       write "config/new.conf", "fresh"
@@ -137,6 +213,329 @@ RSpec.describe Homebrew::InstallSteps do
     expect((root/"var/config/new.conf").read).to eq("fresh\n")
     expect((root/"var/config/kept.conf").read).to eq("user edit")
     expect((root/"var/config/replaced.conf").read).to eq("default\n")
+  end
+
+  specify "snapshots conditions shared by a scope" do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      unless_path_exists "initialised" do
+        mkdir_p "initialised"
+        touch "initialised/marker"
+      end
+    end
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect(root/"var/initialised/marker").to exist
+  end
+
+  specify "keeps guard snapshots separate between concatenated step lists" do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      if_path_exists "missing" do
+        touch "unexpected"
+      end
+    end
+    steps.concat(
+      Homebrew::InstallSteps::DSL.build(default_base: :var) do
+        if_path_exists "existing" do
+          touch "matched"
+        end
+      end,
+    )
+    (root/"var/existing").mkpath
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect(root/"var/matched").to exist
+  end
+
+  specify "runs only steps matching the simulated platform" do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      on_macos do
+        touch "macos"
+      end
+      on_linux do
+        touch "linux"
+      end
+    end
+
+    expect([:macos, :linux].to_h do |os|
+      FileUtils.rm_rf root/"var"
+      Homebrew::SimulateSystem.with(os:) do
+        Homebrew::InstallSteps::Runner.new(context:).run(steps)
+      end
+      [os, [(root/"var/macos").exist?, (root/"var/linux").exist?]]
+    end).to eq(macos: [true, false], linux: [false, true])
+  end
+
+  specify "copies paths" do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var, default_source_base: :staged_path,
+                                              default_target_base: :var) do
+      copy "source.txt", "copied.txt"
+    end
+
+    (root/"stage").mkpath
+    (root/"stage/source.txt").write "copied"
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect((root/"var/copied.txt").read).to eq("copied")
+  end
+
+  specify "replaces copied paths by default and can reject replacement" do
+    rejecting_steps = Homebrew::InstallSteps::DSL.build(default_source_base: :staged_path,
+                                                        default_target_base: :var) do
+      copy "source.txt", "copied.txt", overwrite: false
+    end
+    steps = Homebrew::InstallSteps::DSL.build(default_source_base: :staged_path, default_target_base: :var) do
+      copy "source.txt", "copied.txt"
+    end
+    (root/"stage").mkpath
+    (root/"var").mkpath
+    (root/"stage/source.txt").write "replacement"
+    (root/"var/copied.txt").write "existing"
+
+    expect { Homebrew::InstallSteps::Runner.new(context:).run(rejecting_steps) }.to raise_error(Errno::EEXIST)
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+    expect((root/"var/copied.txt").read).to eq("replacement")
+  end
+
+  specify "replaces symlink destinations when copying files" do
+    steps = Homebrew::InstallSteps::DSL.build(default_source_base: :staged_path, default_target_base: :var) do
+      copy "source.txt", "copied.txt"
+    end
+    (root/"stage").mkpath
+    (root/"var").mkpath
+    (root/"stage/source.txt").write "replacement"
+    (root/"var/linked.txt").write "original"
+    File.symlink "linked.txt", root/"var/copied.txt"
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect([(root/"var/copied.txt").symlink?, (root/"var/copied.txt").read, (root/"var/linked.txt").read])
+      .to eq([false, "replacement", "original"])
+  end
+
+  specify "keeps the shipped move replacement default" do
+    steps = Homebrew::InstallSteps::DSL.build(default_source_base: :staged_path, default_target_base: :var) do
+      move "source.txt", "target.txt"
+    end
+    (root/"stage").mkpath
+    (root/"var").mkpath
+    (root/"stage/source.txt").write "replacement"
+    (root/"var/target.txt").write "existing"
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect((root/"var/target.txt").read).to eq("replacement")
+  end
+
+  specify "requires one match for single-source globs" do
+    steps = Homebrew::InstallSteps::DSL.build(default_source_base: :staged_path, default_target_base: :var) do
+      copy "*.txt", "copied.txt", source_glob: true
+    end
+    (root/"stage").mkpath
+    (root/"stage/first.txt").write "first"
+    (root/"stage/second.txt").write "second"
+
+    expect { Homebrew::InstallSteps::Runner.new(context:).run(steps) }
+      .to raise_error(ArgumentError, /exactly one path/)
+  end
+
+  specify "requires a match for literal glob sources" do
+    steps = Homebrew::InstallSteps::DSL.build(default_source_base: :staged_path, default_target_base: :var) do
+      copy "missing.txt", "copied.txt", source_glob: true
+    end
+
+    expect { Homebrew::InstallSteps::Runner.new(context:).run(steps) }
+      .to raise_error(ArgumentError, /exactly one path/)
+  end
+
+  specify "deduplicates overlapping move source globs" do
+    steps = Homebrew::InstallSteps::DSL.build(default_source_base: :staged_path,
+                                              default_target_base: :staged_path) do
+      move "{WezTerm-*,WezTerm-*}/WezTerm.app", ".", source_glob: true
+    end
+    (root/"stage/WezTerm-nightly/WezTerm.app").mkpath
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect(root/"stage/WezTerm.app").to be_a_directory
+  end
+
+  specify "removes paths and expands globs", :aggregate_failures do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      remove ["obsolete.txt", "obsolete-*"], recursive: true
+    end
+
+    (root/"var/obsolete-dir").mkpath
+    (root/"var/obsolete.txt").write "obsolete"
+    (root/"var/obsolete-dir/child").write "obsolete"
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect(root/"var/obsolete.txt").not_to exist
+    expect(root/"var/obsolete-dir").not_to exist
+  end
+
+  specify "filters removals by symlink target and file content", :aggregate_failures do
+    ENV["PATH"] = (root/"path-bin").to_s
+    steps = Homebrew::InstallSteps::DSL.build do
+      remove "links/*", base: :staged_path, symlink_target_contains: "wanted"
+      remove "launcher", base: :path, content_contains: "owned marker"
+    end
+
+    (root/"stage/links").mkpath
+    (root/"stage/links/wanted").make_symlink("/tmp/wanted-target")
+    (root/"stage/links/kept").make_symlink("/tmp/other-target")
+    (root/"path-bin").mkpath
+    (root/"path-bin/launcher").write "owned marker"
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect(root/"stage/links/wanted").not_to exist
+    expect(root/"stage/links/kept").to be_a_symlink
+    expect(root/"path-bin/launcher").not_to exist
+  end
+
+  specify "uses elevated cask removal when requested" do
+    require "cask/utils"
+
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      remove "protected", sudo: true
+    end
+    (root/"var/protected").mkpath
+    command = class_double(SystemCommand)
+    expect(Cask::Utils).to receive(:gain_permissions_remove).with(root/"var/protected", command:)
+
+    Homebrew::InstallSteps::Runner.new(context:, command:).run(steps)
+  end
+
+  specify "replaces literal and regular expression matches", :aggregate_failures do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      inreplace "literal.txt", "before", "after"
+      inreplace "pattern.txt", /before.+after/i, "replaced"
+    end
+
+    (root/"var").mkpath
+    (root/"var/literal.txt").write "before"
+    (root/"var/pattern.txt").write "BEFORE and AFTER"
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect((root/"var/literal.txt").read).to eq("after")
+    expect((root/"var/pattern.txt").read).to eq("replaced")
+  end
+
+  specify "warns inside a matching path scope" do
+    steps = Homebrew::InstallSteps::DSL.build do
+      if_path_exists "{{var}}/{missing,conflict}" do
+        warn "{{token}} conflict"
+      end
+    end
+    named_context = context
+    named_context.define_singleton_method(:name) { ["Example"] }
+    named_context.define_singleton_method(:token) { "example" }
+    (root/"var/conflict").mkpath
+    runner = Homebrew::InstallSteps::Runner.new(context: named_context)
+    expect(runner).to receive(:opoo).with("example conflict")
+
+    runner.run(steps)
+  end
+
+  specify "runs serialised commands" do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      run "helper", args: ["--path={{var}}"], base: :libexec, env: { "EXAMPLE" => "{{var}}/value" }
+    end
+
+    command = class_double(SystemCommand)
+    expect(command).to receive(:run!)
+      .with(root/"prefix/libexec/helper", args: ["--path=#{root}/var"], sudo: false,
+                                           env: { "EXAMPLE" => "#{root}/var/value" }, input: [], print_stdout: false,
+                                           print_stderr: true, reset_uid: true, chdir: nil)
+
+    Homebrew::InstallSteps::Runner.new(context:, command:).run(steps)
+  end
+
+  specify "serialises command environments as JSON objects" do
+    steps = Homebrew::InstallSteps::DSL.build do
+      run "helper", env: { "EXAMPLE" => "{{formula_name}}" }
+    end
+
+    expect(steps).to include(a_hash_including(
+                               "type" => "run", "env" => { "EXAMPLE" => "{{formula_name}}" },
+                             ))
+  end
+
+  specify "runs commands with serialised input and output paths" do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      run "filter", base: :bin, stdin_path: "input.txt", stdout_path: "output.txt", chdir: "work"
+    end
+
+    (root/"var/work").mkpath
+    (root/"var/input.txt").write "input"
+    result = instance_double(SystemCommand::Result, stdout: "output")
+    command = class_double(SystemCommand)
+    expect(command).to receive(:run!)
+      .with(root/"prefix/bin/filter", args: [], sudo: false, env: {}, input: "input", print_stdout: false,
+                                      print_stderr: true, reset_uid: true, chdir: root/"var/work")
+      .and_return(result)
+
+    Homebrew::InstallSteps::Runner.new(context:, command:).run(steps)
+
+    expect((root/"var/output.txt").read).to eq("output")
+  end
+
+  specify "can ignore process termination failure after retries" do
+    steps = Homebrew::InstallSteps::DSL.build do
+      terminate_process "/Applications/Example.app", match: :full, attempts: 3,
+                                                       notices: ["Closing {{name}}"],
+                                                       failure_message: "Unable to close {{name}}"
+    end
+
+    named_context = context
+    named_context.define_singleton_method(:name) { "Example" }
+    command = class_double(SystemCommand)
+    runner = Homebrew::InstallSteps::Runner.new(context: named_context, command:)
+    allow(runner).to receive(:sleep)
+    expect(runner).to receive(:ohai).with("Closing Example")
+    expect(runner).to receive(:opoo).with("Unable to close Example")
+    expect(command).to receive(:run!)
+      .with("/usr/bin/pkill", args: ["-f", "/Applications/Example.app"], sudo: false,
+                              print_stdout: true, print_stderr: true, reset_uid: true)
+      .exactly(3).times
+      .and_raise(ErrorDuringExecution.new([], status: 1))
+
+    expect { runner.run(steps) }.not_to raise_error
+  end
+
+  specify "rejects unknown process match modes" do
+    expect do
+      Homebrew::InstallSteps::DSL.build do
+        terminate_process "Example", match: :prefix
+      end
+    end.to raise_error(ArgumentError, "terminate_process match must be :name or :full")
+  end
+
+  specify "rejects non-positive process termination attempts" do
+    expect do
+      Homebrew::InstallSteps::DSL.build do
+        terminate_process "Example", attempts: 0
+      end
+    end.to raise_error(ArgumentError, "terminate_process attempts must be positive")
+  end
+
+  specify "uses killall for exact process names" do
+    steps = Homebrew::InstallSteps::DSL.build do
+      terminate_process "Example", must_succeed: true
+    end
+
+    command = class_double(SystemCommand)
+    expect(command).to receive(:run!)
+      .with("/usr/bin/killall", args: ["Example"], sudo: false,
+                                print_stdout: true, print_stderr: true, reset_uid: true)
+
+    Homebrew::InstallSteps::Runner.new(context:, command:).run(steps)
   end
 
   specify "appends a trailing newline unless already present", :aggregate_failures do
@@ -157,12 +556,141 @@ RSpec.describe Homebrew::InstallSteps do
     end.to raise_error(ArgumentError, /non-empty content/)
   end
 
+  specify "runs service data directory initialisers", :aggregate_failures do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      init_data_dir "postgresql@16", using: :postgresql_initdb
+      init_data_dir "postgresql@12", using: :postgresql_initdb, locale: "C"
+      init_data_dir "mysql", using: :mysql_initialize
+      init_data_dir "mysql", using: :mariadb_install_db
+    end
+
+    runner = Homebrew::InstallSteps::Runner.new(context:)
+
+    expect(runner).to receive(:run_command).with(root/"prefix/bin/initdb", "--locale=en_US.UTF-8", "-E", "UTF-8",
+                                                 root/"var/postgresql@16").ordered
+    expect(runner).to receive(:run_command).with(root/"prefix/bin/initdb", "--locale=C", "-E", "UTF-8",
+                                                 root/"var/postgresql@12").ordered
+    expect(runner).to receive(:run_command).with(root/"prefix/bin/mysqld", "--initialize-insecure",
+                                                 "--user=#{ENV.fetch("USER")}", "--basedir=#{root}/prefix",
+                                                 "--datadir=#{root}/var/mysql", "--tmpdir=/tmp").ordered
+    expect(runner).to receive(:run_command).with(root/"prefix/bin/mysql_install_db", "--verbose",
+                                                 "--user=#{ENV.fetch("USER")}", "--basedir=#{root}/prefix",
+                                                 "--datadir=#{root}/var/mysql", "--tmpdir=/tmp").ordered
+
+    runner.run(steps)
+
+    expect(root/"var/postgresql@16").to be_a_directory
+    expect(root/"var/postgresql@12").to be_a_directory
+    expect(root/"var/mysql").to be_a_directory
+  end
+
+  specify "links remapped directories and children before running initdb", :aggregate_failures do
+    homebrew_prefix = root/"homebrew-prefix"
+    stub_const("HOMEBREW_PREFIX", homebrew_prefix)
+    root_path = root
+    versioned_context = Class.new do
+      define_method(:name) { "postgresql@17" }
+      define_method(:version) { Version.new("17.5") }
+      define_method(:prefix) { root_path/"prefix" }
+      define_method(:bin) { root_path/"prefix/bin" }
+      define_method(:var) { root_path/"var" }
+    end.new
+    %w[include lib share].each do |dir|
+      (root/"prefix/#{dir}/postgresql/server").mkpath
+      (root/"prefix/#{dir}/postgresql/server/extension.h").write dir
+      (root/"prefix/#{dir}/postgresql/postgres.bki").write dir
+      (root/"prefix/#{dir}/postgresql/.DS_Store").write ""
+      (homebrew_prefix/dir/"postgresql@17/server").mkpath
+      (homebrew_prefix/dir/"postgresql@17/server/local.h").write dir
+    end
+    (root/"prefix/share/postgresql/conflicting-path").write "source file"
+    (homebrew_prefix/"share/postgresql@17/conflicting-path").mkpath
+    (homebrew_prefix/"share/postgresql@17/conflicting-path/local").write "kept"
+    (root/"prefix/bin").mkpath
+    (root/"prefix/bin/initdb").write ""
+    FileUtils.chmod "+x", root/"prefix/bin/initdb"
+    (root/"prefix/bin/pg_config").write ""
+    FileUtils.chmod "+x", root/"prefix/bin/pg_config"
+
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var, default_source_base: :prefix) do
+      link_dir "include/postgresql", "include/#{name}"
+      link_dir "lib/postgresql", "lib/#{name}"
+      link_dir "share/postgresql", "share/#{name}"
+      link_children "bin", suffix: "-#{version.major}"
+      init_data_dir name, using: :postgresql_initdb
+    end
+
+    runner = Homebrew::InstallSteps::Runner.new(context: versioned_context)
+
+    expect(runner).to receive(:run_command) do |*args|
+      expect(args).to eq([root/"prefix/bin/initdb", "--locale=en_US.UTF-8", "-E", "UTF-8",
+                          root/"var/postgresql@17"])
+      expect(homebrew_prefix/"share/postgresql@17").to be_a_directory
+      expect(homebrew_prefix/"share/postgresql@17/postgres.bki").to be_a_symlink
+    end
+
+    runner.run(steps)
+
+    %w[include lib share].each do |dir|
+      expect(homebrew_prefix/dir/"postgresql@17/server").to be_a_directory
+      expect(homebrew_prefix/dir/"postgresql@17/server/local.h").to exist
+      expect(homebrew_prefix/dir/"postgresql@17/server/extension.h").to be_a_symlink
+      expect(homebrew_prefix/dir/"postgresql@17/postgres.bki").to be_a_symlink
+      expect(homebrew_prefix/dir/"postgresql@17/.DS_Store").not_to exist
+    end
+    expect(homebrew_prefix/"share/postgresql@17/conflicting-path/local").to exist
+    expect(homebrew_prefix/"bin/initdb-17").to be_a_symlink
+    expect(homebrew_prefix/"bin/pg_config-17").to be_a_symlink
+  end
+
+  specify "skips data directory initialisers in CI", :aggregate_failures do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      init_data_dir "postgresql@16", using: :postgresql_initdb
+    end
+
+    ENV["HOMEBREW_GITHUB_ACTIONS"] = "1"
+
+    runner = Homebrew::InstallSteps::Runner.new(context:)
+    expect(runner).not_to receive(:run_command)
+
+    runner.run(steps)
+
+    expect(root/"var/postgresql@16").to be_a_directory
+  end
+
+  specify "skips data directory initialisers when their marker exists", :aggregate_failures do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      init_data_dir "mysql", using: :mysql_initialize
+    end
+
+    (root/"var/mysql/mysql").mkpath
+    (root/"var/mysql/mysql/general_log.CSM").write ""
+
+    runner = Homebrew::InstallSteps::Runner.new(context:)
+    expect(runner).not_to receive(:run_command)
+
+    runner.run(steps)
+
+    expect(root/"var/mysql").to be_a_directory
+  end
+
+  specify "raises on unknown data directory initialisers" do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :var) do
+      init_data_dir "unknown", using: :unknown_database
+    end
+
+    ENV["HOMEBREW_GITHUB_ACTIONS"] = "1"
+
+    expect { Homebrew::InstallSteps::Runner.new(context:).run(steps) }
+      .to raise_error(ArgumentError, /unknown data directory initialiser/)
+    expect(root/"var/unknown").not_to exist
+  end
+
   specify "runs named desktop and cache rebuild actions" do
     steps = Homebrew::InstallSteps::DSL.build do
       compile_gsettings_schemas
       gio_querymodules
       gdk_pixbuf_query_loaders
-      gtk_update_icon_cache
       update_mime_database
       update_desktop_database
     end
@@ -170,22 +698,244 @@ RSpec.describe Homebrew::InstallSteps do
     formula = instance_double(Formula, opt_bin: root/"opt/bin")
     allow(Formula).to receive(:[]).with("glib").and_return(formula)
     allow(Formula).to receive(:[]).with("gdk-pixbuf").and_return(formula)
-    allow(Formula).to receive(:[]).with("gtk+3").and_return(formula)
     allow(Formula).to receive(:[]).with("shared-mime-info").and_return(formula)
     allow(Formula).to receive(:[]).with("desktop-file-utils").and_return(formula)
-    expect(context).to receive(:safe_system).with(root/"opt/bin/glib-compile-schemas",
-                                                  HOMEBREW_PREFIX/"share/glib-2.0/schemas").ordered
-    expect(context).to receive(:safe_system).with(root/"opt/bin/gio-querymodules",
-                                                  HOMEBREW_PREFIX/"lib/gio/modules").ordered
-    expect(context).to receive(:safe_system).with(root/"opt/bin/gdk-pixbuf-query-loaders", "--update-cache").ordered
-    expect(context).to receive(:safe_system).with(root/"opt/bin/gtk3-update-icon-cache", "-q", "-t", "-f",
-                                                  HOMEBREW_PREFIX/"share/icons/hicolor").ordered
-    expect(context).to receive(:safe_system).with(root/"opt/bin/update-mime-database",
-                                                  HOMEBREW_PREFIX/"share/mime").ordered
-    expect(context).to receive(:safe_system).with(root/"opt/bin/update-desktop-database",
-                                                  HOMEBREW_PREFIX/"share/applications").ordered
+
+    runner = Homebrew::InstallSteps::Runner.new(context:)
+    expect(runner).to receive(:run_command).with(root/"opt/bin/glib-compile-schemas",
+                                                 HOMEBREW_PREFIX/"share/glib-2.0/schemas").ordered
+    expect(runner).to receive(:run_command).with(root/"opt/bin/gio-querymodules",
+                                                 HOMEBREW_PREFIX/"lib/gio/modules").ordered
+    expect(runner).to receive(:run_command).with(root/"opt/bin/gdk-pixbuf-query-loaders", "--update-cache").ordered
+    expect(runner).to receive(:run_command).with(root/"opt/bin/update-mime-database",
+                                                 HOMEBREW_PREFIX/"share/mime").ordered
+    expect(runner).to receive(:run_command).with(root/"opt/bin/update-desktop-database",
+                                                 HOMEBREW_PREFIX/"share/applications").ordered
+
+    runner.run(steps)
+  end
+
+  specify "dispatches GCC runtime configuration" do
+    steps = Homebrew::InstallSteps::DSL.build do
+      configure_gcc_runtime
+    end
+
+    runner = Homebrew::InstallSteps::Runner.new(context:)
+    expect(runner).to receive(:run_configure_gcc_runtime)
+
+    runner.run(steps)
+  end
+
+  specify "configures GCC runtime files on Linux", :aggregate_failures do
+    steps = Homebrew::InstallSteps::DSL.build do
+      configure_gcc_runtime
+    end
+    gcc_context = context
+    gcc_context.define_singleton_method(:name) { "gcc" }
+    libgcc = root/"gcc/lib/gcc/15"
+    crtdir = root/"system/lib"
+    libgcc.mkpath
+    crtdir.mkpath
+    crti = crtdir/"crti.o"
+    crti.write "crt"
+    specs = libgcc/"specs"
+    specs.write "old specs"
+    Pathname("#{specs}.orig").write "old original specs"
+    gcc = root/"prefix/bin/gcc-15"
+    original_specs = "*link:\n+ %o \n"
+
+    allow(Homebrew::SimulateSystem).to receive(:simulating_or_running_on_linux?).and_return(true)
+    allow(Utils::Path).to receive(:formula_any_version_installed?).with("glibc").and_return(false)
+    allow(Utils::Path).to receive(:formula_opt_lib).with("glibc").and_return(root/"glibc/lib")
+    runner = Homebrew::InstallSteps::Runner.new(context: gcc_context)
+    expect(runner).to receive(:context_version_major).and_return("15")
+    expect(runner).to receive(:run_command_output)
+      .with(gcc, "-print-libgcc-file-name").ordered
+      .and_return("#{libgcc}/libgcc_s.so\n")
+    expect(runner).to receive(:run_command_output)
+      .with("/usr/bin/cc", "-print-file-name=crti.o").ordered
+      .and_return("#{crti}\n")
+    expect(runner).to receive(:run_command_output)
+      .with(gcc, "-print-multiarch").ordered
+      .and_return("x86_64-linux-gnu\n")
+    expect(runner).to receive(:run_command_output).with(gcc, "-dumpspecs").ordered.and_return(original_specs)
+    expect(FileUtils).to receive(:ln_sf).with([crti.to_s], libgcc).and_call_original
+    expect(FileUtils).to receive(:rm_f).with(["#{specs}.orig", specs]).and_call_original
+
+    runner.run(steps)
+
+    expect(libgcc/"crti.o").to be_a_symlink
+    expect((libgcc/"crti.o").readlink).to eq(crti)
+    expect(Pathname("#{specs}.orig").read).to eq(original_specs)
+    expect(specs.read).to include("%(homebrew_rpath)", "-idirafter /usr/include/x86_64-linux-gnu")
+  end
+
+  specify "dispatches gzipped executable installation" do
+    steps = Homebrew::InstallSteps::DSL.build do
+      install_gzipped_executable "compressed.gz", "bin/executable"
+    end
+
+    runner = Homebrew::InstallSteps::Runner.new(context:)
+    expect(runner).to receive(:run_install_gzipped_executable)
+
+    runner.run(steps)
+  end
+
+  specify "installs a gzipped executable with a fixed mode", :aggregate_failures do
+    require "zlib"
+
+    source = root/"prefix/bin/executable.gz"
+    source.dirname.mkpath
+    Zlib::GzipWriter.open(source.to_s) do |gzip|
+      gzip.orig_name = "stored-name"
+      gzip.write "executable"
+    end
+    stored_name = source.dirname/"stored-name"
+    stored_name.write "preserve"
+    steps = Homebrew::InstallSteps::DSL.build(default_source_base: :prefix, default_target_base: :prefix) do
+      install_gzipped_executable "bin/executable.gz", "bin/executable"
+    end
 
     Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    target = root/"prefix/bin/executable"
+    expect(target.read).to eq("executable")
+    expect(target.stat.mode & 0777).to eq(0755)
+    expect(source).not_to exist
+    expect(stored_name.read).to eq("preserve")
+  end
+
+  describe "runs gtk_update_icon_cache rebuild action" do
+    let(:formula) { instance_double(Formula, opt_bin: root/"opt/bin") }
+    let(:steps) do
+      Homebrew::InstallSteps::DSL.build do
+        gtk_update_icon_cache
+      end
+    end
+
+    it "with gtk4" do
+      allow(Formula).to receive(:[]).with("gtk4").and_return(formula)
+      allow(Utils::Path).to receive(:formula_any_version_installed?).with("gtk4").and_return(true)
+      runner = Homebrew::InstallSteps::Runner.new(context:)
+      expect(runner).to receive(:run_command).with(root/"opt/bin/gtk4-update-icon-cache", "-q", "-t", "-f",
+                                                   HOMEBREW_PREFIX/"share/icons/hicolor").ordered
+      runner.run(steps)
+    end
+
+    it "with gtk+3" do
+      allow(Formula).to receive(:[]).with("gtk+3").and_return(formula)
+      allow(Utils::Path).to receive(:formula_any_version_installed?).with("gtk4").and_return(false)
+      runner = Homebrew::InstallSteps::Runner.new(context:)
+      expect(runner).to receive(:run_command).with(root/"opt/bin/gtk3-update-icon-cache", "-q", "-t", "-f",
+                                                   HOMEBREW_PREFIX/"share/icons/hicolor").ordered
+      runner.run(steps)
+    end
+  end
+
+  specify "deletes matching keychain certificates by SHA-256 hash" do
+    steps = Homebrew::InstallSteps::DSL.build do
+      delete_keychain_certificate "Charles"
+    end
+
+    runner = Homebrew::InstallSteps::Runner.new(context:)
+    expect(runner).to receive(:run_command_output)
+      .with("/usr/bin/security", "find-certificate", "-a", "-c", "Charles", "-Z", sudo: true)
+      .and_return(<<~EOS)
+        SHA-256 hash: ABC123
+        SHA-256 hash: DEF456
+      EOS
+    expect(runner).to receive(:run_command)
+      .with("/usr/bin/security", "delete-certificate", "-Z", "ABC123", sudo: true).ordered
+    expect(runner).to receive(:run_command)
+      .with("/usr/bin/security", "delete-certificate", "-Z", "DEF456", sudo: true).ordered
+
+    runner.run(steps)
+  end
+
+  specify "only deletes the keychain certificate matching a local certificate" do
+    certificate = root/"home/Library/Application Support/betwixt/ssl/certs/ca.pem"
+    certificate.dirname.mkpath
+    certificate.write "certificate"
+    steps = Homebrew::InstallSteps::DSL.build do
+      delete_keychain_certificate "NodeMITMProxyCA", matching_certificate: certificate
+    end
+
+    runner = Homebrew::InstallSteps::Runner.new(context:)
+    expect(runner).to receive(:run_command_output)
+      .with("/usr/bin/openssl", "x509", "-fingerprint", "-sha256", "-noout", "-in", certificate)
+      .and_return("sha256 Fingerprint=AB:CD:EF\n")
+    expect(runner).to receive(:run_command_output)
+      .with("/usr/bin/security", "find-certificate", "-a", "-c", "NodeMITMProxyCA", "-Z", sudo: true)
+      .and_return(<<~EOS)
+        SHA-256 hash: ABCDEF
+        SHA-256 hash: FEDCBA
+      EOS
+    expect(runner).to receive(:run_command)
+      .with("/usr/bin/security", "delete-certificate", "-Z", "ABCDEF", sudo: true)
+
+    runner.run(steps)
+  end
+
+  specify "skips keychain certificate deletion when a local certificate is missing" do
+    certificate = root/"missing.pem"
+    steps = Homebrew::InstallSteps::DSL.build do
+      delete_keychain_certificate "NodeMITMProxyCA", matching_certificate: certificate
+    end
+
+    runner = Homebrew::InstallSteps::Runner.new(context:)
+    expect(runner).not_to receive(:run_command_output)
+    expect(runner).not_to receive(:run_command)
+
+    runner.run(steps)
+  end
+
+  specify "sets permissions and ownership for existing cask step paths" do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :staged_path) do
+      set_permissions ["Prepared.app", "Missing.app"], "0755"
+      set_permissions "Prepared.file", "0644", recursive: false
+      set_ownership "Owned.app", user: "root", group: "wheel"
+      set_ownership "Owned.file", user: "root", group: "wheel", recursive: false
+    end
+
+    command = class_double(SystemCommand)
+    (root/"stage/Prepared.app").mkpath
+    (root/"stage/Prepared.file").write ""
+    (root/"stage/Owned.app").mkpath
+    (root/"stage/Owned.file").write ""
+
+    allow(Cask::Quarantine).to receive(:app_management_permissions_granted?)
+      .with(app: root/"stage/Owned.app", command:)
+      .and_return(true)
+    allow(Cask::Quarantine).to receive(:app_management_permissions_granted?)
+      .with(app: root/"stage/Owned.file", command:)
+      .and_return(true)
+    expect(command).to receive(:run!)
+      .with("chmod", args: ["-R", "--", "0755", root/"stage/Prepared.app"], sudo: false).ordered
+    expect(command).to receive(:run!)
+      .with("chmod", args: ["--", "0644", root/"stage/Prepared.file"], sudo: false).ordered
+    expect(command).to receive(:run!)
+      .with("chown", args: ["-R", "--", "root:wheel", root/"stage/Owned.app"], sudo: true).ordered
+    expect(command).to receive(:run!)
+      .with("chown", args: ["--", "root:wheel", root/"stage/Owned.file"], sudo: true).ordered
+
+    Homebrew::InstallSteps::Runner.new(context:, command:).run(steps)
+  end
+
+  specify "raises when App Management permissions are missing for ownership steps" do
+    steps = Homebrew::InstallSteps::DSL.build(default_base: :staged_path) do
+      set_ownership "Owned.app"
+    end
+
+    command = class_double(SystemCommand)
+    (root/"stage/Owned.app").mkpath
+
+    allow(Cask::Quarantine).to receive(:app_management_permissions_granted?)
+      .with(app: root/"stage/Owned.app", command:)
+      .and_return(false)
+    expect(command).not_to receive(:run!)
+
+    expect { Homebrew::InstallSteps::Runner.new(context:, command:).run(steps) }
+      .to raise_error(Cask::CaskError, /App Management permissions/)
   end
 
   specify "does not add the default base to home paths" do
@@ -214,6 +964,40 @@ RSpec.describe Homebrew::InstallSteps do
     expect(root/"stage/Nested/source-file").to exist
   end
 
+  specify "moves a directory's contents" do
+    steps = Homebrew::InstallSteps::DSL.build(default_source_base: :staged_path, default_target_base: :staged_path) do
+      move_contents ".", "Nested"
+    end
+    (root/"stage").mkpath
+    (root/"stage/source-file").write "source"
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps)
+
+    expect(root/"stage/Nested/source-file").to exist
+  end
+
+  specify "uses sudo only when an if-needed symlink target is not writable" do
+    steps = Homebrew::InstallSteps::DSL.build(default_target_base: :staged_path) do
+      symlink "target", "writable/linked-target", source_base: :relative, sudo: :if_needed
+      symlink "target", "protected/linked-target", source_base: :relative, sudo: :if_needed
+    end
+    protected_dir = root/"stage/protected"
+    (root/"stage/writable").mkpath
+    protected_dir.mkpath
+    FileUtils.chmod "-w", protected_dir
+    command = class_double(SystemCommand)
+    expect(command).to receive(:run!)
+      .with("/bin/ln", args: ["-s", "target", protected_dir/"linked-target"], sudo: true)
+
+    begin
+      Homebrew::InstallSteps::Runner.new(context:, command:).run(steps)
+    ensure
+      FileUtils.chmod "+w", protected_dir
+    end
+
+    expect(root/"stage/writable/linked-target").to be_a_symlink
+  end
+
   specify "removes symlinks marked for uninstall" do
     steps = Homebrew::InstallSteps::DSL.build(default_target_base: :staged_path) do
       ln_sf "target", "linked-target", source_base: :relative, uninstall: true
@@ -225,6 +1009,37 @@ RSpec.describe Homebrew::InstallSteps do
     Homebrew::InstallSteps::Runner.new(context:).run(steps, phase: :uninstall)
 
     expect(root/"stage/linked-target").not_to be_a_symlink
+  end
+
+  specify "preserves symlinks with unexpected targets on uninstall" do
+    steps = Homebrew::InstallSteps::DSL.build(default_target_base: :staged_path) do
+      symlink "target", "linked-target", source_base: :relative, uninstall: true
+    end
+    (root/"stage").mkpath
+    File.symlink "different-target", root/"stage/linked-target"
+
+    Homebrew::InstallSteps::Runner.new(context:).run(steps, phase: :uninstall)
+
+    expect(root/"stage/linked-target").to be_a_symlink
+  end
+
+  specify "uses elevated removal for matching symlinks when needed" do
+    steps = Homebrew::InstallSteps::DSL.build(default_target_base: :staged_path) do
+      symlink "target", "protected/linked-target", source_base: :relative, uninstall: true, sudo: :if_needed
+    end
+    protected_dir = root/"stage/protected"
+    protected_dir.mkpath
+    target = protected_dir/"linked-target"
+    File.symlink "target", target
+    FileUtils.chmod "-w", protected_dir
+    command = class_double(SystemCommand)
+    expect(Cask::Utils).to receive(:gain_permissions_remove).with(target, command:)
+
+    begin
+      Homebrew::InstallSteps::Runner.new(context:, command:).run(steps, phase: :uninstall)
+    ensure
+      FileUtils.chmod "+w", protected_dir
+    end
   end
 
   specify "does not expose the surrounding formula or cask DSL" do

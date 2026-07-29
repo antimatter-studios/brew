@@ -28,6 +28,8 @@ module Homebrew
                description: "Output the number of events by OS name and version."
         switch "--homebrew-devcmdrun-developer",
                description: "Output the number of devcmdrun/HOMEBREW_DEVELOPER events."
+        switch "--homebrew-env-config",
+               description: "Output rates of non-default Homebrew environment configuration variables."
         switch "--homebrew-os-arch-ci",
                description: "Output the number of OS/Architecture/CI events."
         switch "--homebrew-prefixes",
@@ -49,8 +51,9 @@ module Homebrew
                description: "Install the necessary gems, require them and exit without running a query."
 
         conflicts "--install", "--cask-install", "--install-on-request", "--build-error", "--os-version",
-                  "--homebrew-devcmdrun-developer", "--homebrew-os-arch-ci", "--homebrew-prefixes",
-                  "--homebrew-versions", "--brew-command-run", "--brew-command-run-options", "--brew-test-bot-test"
+                  "--homebrew-devcmdrun-developer", "--homebrew-env-config", "--homebrew-os-arch-ci",
+                  "--homebrew-prefixes", "--homebrew-versions", "--brew-command-run", "--brew-command-run-options",
+                  "--brew-test-bot-test"
         conflicts "--json", "--all-core-formulae-json", "--setup"
 
         named_args :none
@@ -58,7 +61,7 @@ module Homebrew
         hide_from_man_page!
       end
 
-      FIRST_INFLUXDB_ANALYTICS_DATE = T.let(Date.new(2023, 03, 27).freeze, Date)
+      FIRST_INFLUXDB_ANALYTICS_DATE = Date.new(2023, 03, 27).freeze
 
       sig { override.void }
       def run
@@ -142,6 +145,7 @@ module Homebrew
         categories << :formula_install if args.install?
         categories << :formula_install_on_request if args.install_on_request?
         categories << :homebrew_devcmdrun_developer if args.homebrew_devcmdrun_developer?
+        categories << :homebrew_env_config if args.homebrew_env_config?
         categories << :homebrew_os_arch_ci if args.homebrew_os_arch_ci?
         categories << :homebrew_prefixes if args.homebrew_prefixes?
         categories << :homebrew_versions if args.homebrew_versions?
@@ -156,7 +160,7 @@ module Homebrew
           additional_where = all_core_formulae_json ? " AND tap_name ~ '^homebrew/(core|cask)$'" : ""
           bucket = if category_matching_buckets.include?(category)
             category
-          elsif category == :command_run_options
+          elsif [:command_run_options, :homebrew_env_config].include?(category)
             :command_run
           else
             :formula_install
@@ -166,6 +170,12 @@ module Homebrew
           when :homebrew_devcmdrun_developer
             dimension_key = "devcmdrun_developer"
             groups = [:devcmdrun, :developer]
+          when :homebrew_env_config
+            dimension_key = "env_config"
+            groups = [:env_config, :env_config_state]
+            # Events predating the user-set-aware `env_config_state` tag
+            # counted brew's own exports as configuration, so drop them.
+            additional_where += " AND env_config_state IS NOT NULL"
           when :homebrew_os_arch_ci
             dimension_key = "os_arch_ci"
             groups = [:os, :arch, :ci]
@@ -185,7 +195,6 @@ module Homebrew
           when :command_run_options
             dimension_key = "command_run_options"
             groups = [:command, :options, :devcmdrun, :developer]
-            additional_where += " AND ci = 'false'"
           when :test_bot_test
             dimension_key = "test_bot_test"
             groups = [:command, :passed, :arch, :os]
@@ -222,6 +231,27 @@ module Homebrew
 
           batches.each do |batch|
             batch.to_pylist.each do |record|
+              if category == :homebrew_env_config
+                state = record["env_config_state"]
+                env_config_name = record["env_config"].to_s
+                # Drop malformed events from non-standard clients and events
+                # for variables Homebrew no longer supports.
+                next if %w[unset default non_default].exclude?(state)
+                next unless Homebrew::EnvConfig::ENVS.key?(env_config_name.to_sym)
+
+                count = record["count"]
+                json[:total_count] += count
+                json[:items] << {
+                  number: nil,
+                  dimension_key => env_config_name,
+                  count:,
+                  non_default_count: (state == "non_default") ? count : 0,
+                  set_default_count: (state == "default") ? count : 0,
+                  unset_count:       (state == "unset") ? count : 0,
+                }
+                next
+              end
+
               dimension = case category
               when :homebrew_devcmdrun_developer
                 "devcmdrun=#{record["devcmdrun"]} HOMEBREW_DEVELOPER=#{record["developer"]}"
@@ -302,12 +332,18 @@ module Homebrew
             key = item[dimension_key]
             if deduped_items.key?(key)
               deduped_items[key][:count] += item[:count]
+              if category == :homebrew_env_config
+                deduped_items[key][:non_default_count] += item[:non_default_count]
+                deduped_items[key][:set_default_count] += item[:set_default_count]
+                deduped_items[key][:unset_count] += item[:unset_count]
+              end
             else
               deduped_items[key] = item
             end
           end
 
           json[:items] = deduped_items.values
+          json[:total_items] = json[:items].length if category == :homebrew_env_config
 
           if all_core_formulae_json
             core_formula_items = {}
@@ -332,15 +368,29 @@ module Homebrew
             json[:formulae] = core_formula_items.sort_by { |name, _| name }.to_h
           else
             json[:items].sort_by! do |item|
-              -item[:count]
+              if category == :homebrew_env_config
+                -item[:non_default_count].to_f / item[:count]
+              else
+                -item[:count]
+              end
             end
 
             json[:items].each_with_index do |item, index|
               item[:number] = index + 1
 
-              percent = (item[:count].to_f / json[:total_count]) * 100
+              percent = if category == :homebrew_env_config
+                (item[:non_default_count].to_f / item[:count]) * 100
+              else
+                (item[:count].to_f / json[:total_count]) * 100
+              end
               item[:percent] = format_percent(percent)
               item[:count] = format_count(item[:count])
+              next if category != :homebrew_env_config
+
+              item[:non_default_count] = format_count(item[:non_default_count])
+              item[:set_default_count] = format_count(item[:set_default_count])
+              item[:unset_count] = format_count(item[:unset_count])
+              item[:default_value] = Homebrew::EnvConfig.default_description(item[dimension_key].to_sym)
             end
           end
 
@@ -389,6 +439,8 @@ module Homebrew
         when /Fedora Linux (\d+)[.\d]*/ then "Fedora Linux #{Regexp.last_match(1)}"
         when /KDE neon .*?([\d.]+)/ then "KDE neon #{Regexp.last_match(1)}"
         when /Amazon Linux (\d+)\.[.\d]*/ then "Amazon Linux #{Regexp.last_match(1)}"
+        when /^Armbian\S*(?: OS)? (\d+)\.0?(\d+)\S*(?: (\w+))?/
+          "Armbian #{Regexp.last_match(1)}.#{Regexp.last_match(2)} #{Regexp.last_match(3)&.downcase}".strip
         when /Fedora Linux Rawhide[.\dn]*/ then "Fedora Linux Rawhide"
         when /Red Hat Enterprise Linux CoreOS (\d+\.\d+)[-.\d]*/
           "Red Hat Enterprise Linux CoreOS #{Regexp.last_match(1)}"

@@ -18,10 +18,7 @@ class Tap
   extend Utils::Output::Mixin
   include Utils::Output::Mixin
 
-  # Sorbet type members are mutable by design and cannot be frozen.
-  # rubocop:disable Style/MutableConstant
   Cache = type_template { { fixed: T::Hash[T.any(String, Symbol), T.untyped] } }
-  # rubocop:enable Style/MutableConstant
 
   HOMEBREW_TAP_CASK_RENAMES_FILE = "cask_renames.json"
   private_constant :HOMEBREW_TAP_CASK_RENAMES_FILE
@@ -40,7 +37,7 @@ class Tap
   HOMEBREW_TAP_STYLE_EXCEPTIONS_DIR = "style_exceptions"
   private_constant :HOMEBREW_TAP_STYLE_EXCEPTIONS_DIR
 
-  HOMEBREW_TAP_JSON_FILES = T.let(%W[
+  HOMEBREW_TAP_JSON_FILES = %W[
     #{HOMEBREW_TAP_FORMULA_RENAMES_FILE}
     #{HOMEBREW_TAP_CASK_RENAMES_FILE}
     #{HOMEBREW_TAP_MIGRATIONS_FILE}
@@ -48,7 +45,7 @@ class Tap
     #{HOMEBREW_TAP_DISABLED_NEW_USR_LOCAL_RELOCATION_FORMULAE_FILE}
     #{HOMEBREW_TAP_AUDIT_EXCEPTIONS_DIR}/*.json
     #{HOMEBREW_TAP_STYLE_EXCEPTIONS_DIR}/*.json
-  ].freeze, T::Array[String])
+  ].freeze
 
   class InvalidNameError < ArgumentError; end
 
@@ -591,8 +588,7 @@ class Tap
       clear_cache
     end
 
-    # `--` guards against a redirect value that begins with `-` being treated as a `git` option.
-    safe_system "git", "-C", path, "remote", "set-url", "origin", "--", redirected_remote
+    safe_system "git", "-C", path, "remote", "set-url", "origin", "--end-of-options", redirected_remote
     clear_cache
     Tap.clear_cache
 
@@ -617,7 +613,6 @@ class Tap
 
     SystemCommand.run!("git", args:, chdir:, env: { "GIT_TERMINAL_PROMPT" => "0" }, print_stderr: true)
   end
-  private :git_command!
 
   # Like {#git_command!} but does not raise on failure.
   sig { params(args: T::Array[T.any(String, Pathname)], chdir: T.nilable(Pathname)).returns(T.untyped) }
@@ -796,7 +791,7 @@ class Tap
     Tap.clear_cache
 
     $stderr.ohai "Tapping #{name}" unless quiet
-    args = %W[clone #{requested_remote} #{path}]
+    args = %w[clone]
 
     # Override possible user configs like:
     #   git config --global clone.defaultRemoteName notorigin
@@ -807,6 +802,7 @@ class Tap
     args << "--template="
     # Prevent `fsmonitor` from watching this repository.
     args << "--config" << "core.fsmonitor=false"
+    args << "--end-of-options" << requested_remote << path.to_s
 
     # Clone third-party taps without blobs or a checkout so that the tap's
     # `Tapfile` (if any) can filter which paths are materialised before any
@@ -908,7 +904,7 @@ class Tap
   def fix_remote_configuration(requested_remote: nil, quiet: false)
     if requested_remote.present?
       path.cd do
-        safe_system "git", "remote", "set-url", "origin", requested_remote
+        safe_system "git", "remote", "set-url", "origin", "--end-of-options", requested_remote
         safe_system "git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"
       end
       $stderr.ohai "#{name}: changed remote from #{remote} to #{requested_remote}" unless quiet
@@ -1263,6 +1259,8 @@ class Tap
 
   sig { returns(T::Hash[String, T.untyped]) }
   def to_hash
+    require "trust"
+
     hash = {
       "name"          => name,
       "user"          => user,

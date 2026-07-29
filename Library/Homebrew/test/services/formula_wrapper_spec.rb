@@ -170,29 +170,24 @@ RSpec.describe Homebrew::Services::FormulaWrapper, :needs_daemon_manager do
     end
   end
 
-  describe "#plist?" do
-    it "false if not installed" do
-      allow(service).to receive(:installed?).and_return(false)
-      expect(service.plist?).to be(false)
-    end
-
-    it "true if installed and file" do
-      tempfile = File.new("/tmp/foo", File::CREAT)
-      allow(service).to receive_messages(installed?: true, service_file: tempfile_path = Pathname.new(tempfile))
-      expect(service.plist?).to be(true)
-      File.delete(tempfile_path)
-    end
-
-    it "false if opt_prefix missing" do
-      allow(service).to receive_messages(installed?:   true,
-                                         service_file: Pathname.new(File::NULL),
-                                         formula:      instance_double(Formula,
-                                                                       opt_prefix: Pathname.new("/dfslkfhjdsolshlk")))
-      expect(service.plist?).to be(false)
-    end
-  end
-
   describe "#owner" do
+    it "reads the user from a launchd plist" do
+      plist = mktmpdir/"homebrew.test.plist"
+      plist.write <<~XML
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0">
+          <dict>
+            <key>UserName</key>
+            <string>_serviced</string>
+          </dict>
+        </plist>
+      XML
+      allow(Homebrew::Services::System).to receive(:launchctl?).and_return(true)
+      allow(service).to receive(:dest).and_return(plist)
+
+      expect(service.owner).to eq("_serviced")
+    end
+
     it "root if file present" do
       allow(service).to receive(:boot_path_service_file_present?).and_return(true)
       expect(service.owner).to eq("root")

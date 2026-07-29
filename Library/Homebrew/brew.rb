@@ -1,6 +1,12 @@
 # typed: strict
 # frozen_string_literal: true
 
+phase_timings_output = ENV.delete("HOMEBREW_PHASE_TIMINGS")
+if phase_timings_output
+  phase_timings_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC).to_f
+  phase_timings_command = ARGV.dup
+end
+
 # `HOMEBREW_STACKPROF` should be set via `brew prof --stackprof`, not manually.
 if ENV["HOMEBREW_STACKPROF"]
   require "rubygems"
@@ -17,6 +23,15 @@ std_trap = trap("INT") { exit! 130 } # no backtrace thanks
 
 require_relative "global"
 require "utils/output"
+
+if phase_timings_output
+  require "utils/phase_timings"
+  Homebrew::PhaseTimings.start!(
+    output_path: phase_timings_output,
+    started_at:  phase_timings_started_at,
+    command:     phase_timings_command,
+  )
+end
 
 begin
   trap("INT", std_trap) # restore default CTRL-C handler
@@ -77,7 +92,7 @@ begin
       # External commands expect a normal PATH
       ENV["PATH"] = homebrew_path.to_s
 
-      external_ruby_v2_cmd = Commands.external_ruby_v2_cmd_path(cmd).present?
+      external_ruby_v2_cmd = !Commands.external_ruby_v2_cmd_path(cmd).nil?
       external_ruby_cmd_path = Commands.external_ruby_cmd_path(cmd) unless external_ruby_v2_cmd
       external_cmd_path = Commands.external_cmd_path(cmd) if !external_ruby_v2_cmd && external_ruby_cmd_path.nil?
     end
@@ -109,10 +124,10 @@ begin
     end
     Homebrew.running_command = cmd
     if cmd_class
-      unless Homebrew::EnvConfig.no_install_from_api?
-        require "api"
-        Homebrew::API.fetch_api_files!
-      end
+      install_from_api = !Homebrew::EnvConfig.no_install_from_api?
+      require "api" if install_from_api
+      Homebrew::PhaseTimings.install! if phase_timings_output
+      Homebrew::API.fetch_api_files! if install_from_api
 
       command_instance = cmd_class.new
 
@@ -143,7 +158,7 @@ begin
     ENV["HOMEBREW_LIBRARY_PATH"] = HOMEBREW_LIBRARY_PATH.to_s
     exec external_cmd_path.to_s, *ARGV
   else
-    raise UsageError, "Unknown command: brew #{cmd}"
+    raise UsageError, "Unknown command: brew #{cmd}#{Commands.suggestion_message(cmd)}"
   end
 rescue UsageError => e
   require "help"
@@ -232,4 +247,5 @@ ensure
     StackProf.stop
     StackProf.results("prof/stackprof.dump")
   end
+  Homebrew::PhaseTimings.write! if phase_timings_output
 end

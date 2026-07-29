@@ -45,26 +45,6 @@ module Homebrew
         exec_browser(*repo_urls)
       end
 
-      private
-
-      sig { params(formula: Formula).returns(T.nilable(String)) }
-      def extract_repo_url(formula)
-        urls_to_check = [
-          formula.head&.url,
-          formula.stable&.url,
-          formula.homepage,
-        ]
-
-        urls_to_check.each do |url|
-          next if url.nil?
-
-          repo_url = url_to_repo(url)
-          return repo_url if repo_url
-        end
-
-        nil
-      end
-
       sig { params(url: String).returns(T.nilable(String)) }
       def url_to_repo(url)
         github_repo_url(url) ||
@@ -72,7 +52,8 @@ module Homebrew
           bitbucket_repo_url(url) ||
           codeberg_repo_url(url) ||
           sourcehut_repo_url(url) ||
-          pypi_repo_url(url)
+          pypi_repo_url(url) ||
+          npm_repo_url(url)
       end
 
       sig { params(url: String).returns(T.nilable(String)) }
@@ -180,6 +161,50 @@ module Homebrew
         project_urls["repository"] || project_urls["source"] ||
           url_to_repo(project_urls.fetch("homepage", "")) # Homepages often link to source repositories
       rescue JSON::ParserError
+        nil
+      end
+
+      sig { params(url: String).returns(T.nilable(String)) }
+      def npm_repo_url(url)
+        regex = %r{
+          https?://registry\.npmjs\.org/
+          (?<package_name>(?:@[\w.-]+/)?[\w.-]+)/
+          (?:/.*)?
+        }x
+        match = url.match(regex)
+        return unless match
+
+        package_name = match[:package_name]
+        return unless package_name
+
+        api_url = "https://registry.npmjs.org/#{URI.encode_uri_component(package_name)}/latest"
+        curl_args = Utils::Curl.curl_args(show_error: false, retries: 2)
+        stdout, _, status = Utils::Curl.curl_output(*curl_args, api_url)
+        return unless status.success?
+
+        url = JSON.parse(stdout).dig("repository", "url")
+        url&.delete_prefix("git+")
+      rescue JSON::ParserError
+        nil
+      end
+
+      private
+
+      sig { params(formula: Formula).returns(T.nilable(String)) }
+      def extract_repo_url(formula)
+        urls_to_check = [
+          formula.head&.url,
+          formula.stable&.url,
+          formula.homepage,
+        ]
+
+        urls_to_check.each do |url|
+          next if url.nil?
+
+          repo_url = url_to_repo(url)
+          return repo_url if repo_url
+        end
+
         nil
       end
     end

@@ -10,12 +10,14 @@ RSpec.describe Cask::Artifact::AbstractInstallSteps, :cask do
 
       preflight_steps do
         mkdir_p "Prepared"
+        set_permissions "Prepared", "0755"
         touch "Prepared/touched"
       end
 
       postflight_steps do
         mv "move-source", "Prepared/moved"
         ln_s "Prepared/moved", "PreparedLink", source_base: :relative, uninstall: true
+        run "/usr/bin/true"
       end
 
       uninstall_preflight_steps do
@@ -35,9 +37,15 @@ RSpec.describe Cask::Artifact::AbstractInstallSteps, :cask do
     (cask.staged_path/"move-source").write "moved"
 
     installer = Cask::Installer.new(cask, command: NeverSudoSystemCommand)
-    installer.install_artifacts
+    previous_umask = File.umask(077)
+    begin
+      installer.install_artifacts
+    ensure
+      File.umask(previous_umask)
+    end
 
     expect(cask.staged_path/"Prepared").to be_a_directory
+    expect((cask.staged_path/"Prepared").stat.mode & 0777).to eq(0755)
     expect(cask.staged_path/"Prepared/touched").to exist
     expect(cask.staged_path/"Prepared/moved").to exist
     expect(cask.staged_path/"PreparedLink").to be_a_symlink
@@ -46,6 +54,13 @@ RSpec.describe Cask::Artifact::AbstractInstallSteps, :cask do
 
     expect(cask.staged_path/"PreparedLink").not_to exist
     expect(cask.staged_path/"UninstallMoved/touched").to exist
+  end
+
+  it "omits cask command output defaults" do
+    artifact = cask.artifacts.find { |candidate| candidate.is_a?(Cask::Artifact::PostflightSteps) }
+    run_step = artifact.steps.find { |step| step["type"] == "run" }
+
+    expect(run_step).not_to include("print_stdout", "suppress_stderr")
   end
 
   it "ignores a flight block when matching steps are defined" do

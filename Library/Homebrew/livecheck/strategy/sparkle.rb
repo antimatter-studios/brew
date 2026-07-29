@@ -23,7 +23,7 @@ module Homebrew
         URL_MATCH_REGEX = %r{^https?://}i
 
         # Common `os` values used in appcasts to refer to macOS.
-        APPCAST_MACOS_STRINGS = T.let(["macos", "osx"].freeze, T::Array[String])
+        APPCAST_MACOS_STRINGS = ["macos", "osx"].freeze
 
         # Whether the strategy can be applied to the provided URL.
         #
@@ -210,7 +210,7 @@ module Homebrew
           items = sort_items(filter_items(items_from_content(content)))
           return [] if items.empty?
 
-          item = T.must(items.first)
+          item = items.fetch(0)
 
           if block
             block_return_value = case block.parameters[0]

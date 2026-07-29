@@ -43,9 +43,11 @@ module Cask
       Artifact::Artifact,
       Artifact::AudioUnitPlugin,
       Artifact::Binary,
+      Artifact::CommandWrapper,
       Artifact::Colorpicker,
       Artifact::Dictionary,
       Artifact::Font,
+      Artifact::GeneratedScript,
       Artifact::InputMethod,
       Artifact::InternetPlugin,
       Artifact::KeyboardLayout,
@@ -109,6 +111,7 @@ module Cask
       :desc,
       :depends_on,
       :homepage,
+      :homepage_browsed,
       :language,
       :name,
       :os,
@@ -188,6 +191,9 @@ module Cask
     sig { returns(T.nilable(String)) }
     attr_reader :disable_replacement_formula
 
+    sig { returns(T.nilable(Date)) }
+    attr_reader :homepage_browsed
+
     sig { returns(T.nilable(T::Hash[Symbol, T.nilable(T.any(String, Symbol))])) }
     attr_reader :disable_args
 
@@ -228,6 +234,7 @@ module Cask
       @disable_args = T.let(nil, T.nilable(T::Hash[Symbol, T.nilable(T.any(String, Symbol))]))
       @disabled = T.let(false, T::Boolean)
       @homepage = T.let(nil, T.nilable(String))
+      @homepage_browsed = T.let(nil, T.nilable(Date))
       @homepage_set_in_block = T.let(false, T::Boolean)
       @language_blocks = T.let({}, T::Hash[T::Array[String], Proc])
       @language_eval = T.let(nil, T.nilable(String))
@@ -341,13 +348,21 @@ module Cask
     # ### Example
     #
     # ```ruby
-    # homepage "https://code.visualstudio.com/"
+    # homepage "https://code.visualstudio.com/", browsed: "2026-07-26"
     # ```
     #
+    # `browsed` is the date when a human last checked the homepage in a browser.
+    # Automated homepage availability audits are skipped for one year.
+    #
     # @api public
-    sig { params(homepage: T.nilable(String)).returns(T.nilable(String)) }
-    def homepage(homepage = nil)
-      set_unique_stanza(:homepage, homepage.nil?) { homepage }
+    sig { params(homepage: T.nilable(String), browsed: T.nilable(String)).returns(T.nilable(String)) }
+    def homepage(homepage = nil, browsed: nil)
+      raise CaskInvalidError.new(cask, "`browsed` requires a homepage URL") if homepage.nil? && browsed
+
+      set_unique_stanza(:homepage, homepage.nil?) do
+        @homepage_browsed = Date.parse(browsed) if browsed
+        homepage
+      end
     end
 
     # Specifies language-specific values for the cask.
@@ -411,6 +426,19 @@ module Cask
       @language_blocks.keys.flatten
     end
 
+    sig { returns(T::Array[T::Array[String]]) }
+    def language_groups
+      @language_blocks.keys
+    end
+
+    sig { returns(T.nilable(T::Array[String])) }
+    def default_language_group
+      default_language_block = @language_blocks.default
+      return if default_language_block.nil?
+
+      @language_blocks.key(default_language_block)
+    end
+
     # Sets the cask's download URL.
     #
     # ### Example
@@ -424,6 +452,9 @@ module Cask
     def url(uri = nil, **options)
       caller_location = caller_locations.fetch(0)
       return @url unless uri
+
+      # Keep accepting `verified` as a no-op for compatibility with existing casks.
+      # odeprecated "the `verified` parameter in the `url` stanza" if options[:verified]
 
       set_unique_stanza(:url, false) do
         URL.new(uri, **options, caller_location:)
@@ -548,6 +579,20 @@ module Cask
           :no_check
         when String
           Checksum.new(val)
+        when nil
+          # Checksums declared for only the other OS mean no checksum for the
+          # running OS, matching `sha256` inside an `on_macos`/`on_linux` block;
+          # `depends_on` governs whether the cask is usable there. A checksum
+          # declared for the running OS but missing the running architecture
+          # still raises.
+          running_os_checksums = if OnSystem.os_condition_met?(:linux)
+            [x86_64_linux, arm64_linux]
+          else
+            [arm, x86_64]
+          end
+          raise CaskInvalidError.new(cask, "invalid 'sha256' value: nil") if running_os_checksums.any?(&:present?)
+
+          nil
         else
           raise CaskInvalidError.new(cask, "invalid 'sha256' value: #{val.inspect}")
         end
@@ -690,7 +735,7 @@ module Cask
     # Automatically fetch the latest version of a cask from changelogs.
     #
     # @api public
-    sig { params(block: T.nilable(T.proc.void)).returns(Livecheck) }
+    sig { params(block: T.nilable(T.proc.bind(Livecheck).void)).returns(Livecheck) }
     def livecheck(&block)
       return @livecheck unless block
 

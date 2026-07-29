@@ -7,8 +7,7 @@ RSpec.describe Utils::Tar do
   def clear_executable_cache
     return unless described_class.instance_variable_defined?(:@executable)
 
-    described_class.send(:remove_instance_variable,
-                         :@executable)
+    described_class.remove_instance_variable(:@executable)
   end
 
   before do
@@ -17,7 +16,7 @@ RSpec.describe Utils::Tar do
 
   describe ".available?" do
     it "returns true if tar or gnu-tar is available" do
-      if described_class.executable.present?
+      if described_class.executable
         expect(described_class).to be_available
       else
         expect(described_class).not_to be_available

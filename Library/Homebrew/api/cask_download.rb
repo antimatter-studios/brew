@@ -12,12 +12,15 @@ module Homebrew
         params(
           token:       String,
           cask_struct: Homebrew::API::CaskStruct,
+          languages:   T.nilable(T::Array[String]),
           quarantine:  T.nilable(T::Boolean),
           require_sha: T::Boolean,
         ).returns(T.nilable(::Cask::Download))
       }
-      def self.download(token:, cask_struct:, quarantine: nil, require_sha: false)
-        return if cask_struct.languages.any?
+      def self.download(token:, cask_struct:, languages: nil, quarantine: nil, require_sha: false)
+        languages ||= cask_struct.languages.empty? ? [] : ::Cask::Config.new.languages
+        cask_struct = cask_struct.localise(languages)
+        return if cask_struct.languages.any? && cask_struct.language_variations.empty?
         return if cask_struct.url_args.empty?
 
         cask = ::Cask::Cask.new(
@@ -30,6 +33,14 @@ module Homebrew
           sha256 cask_struct.sha256
           url(*cask_struct.url_args, **cask_struct.url_kwargs)
           homepage cask_struct.homepage if cask_struct.homepage?
+          if cask_struct.container?
+            container(nested: cask_struct.container_args[:nested], type: cask_struct.container_args[:type])
+          end
+          # Staging (and the download queue's pre-staging) performs rename
+          # operations through this cask, so they must be preserved here.
+          cask_struct.renames.each do |from, to|
+            rename from, to
+          end
         end
 
         ::Cask::Download.new(cask, quarantine:, require_sha:)

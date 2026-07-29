@@ -2,6 +2,8 @@
 # frozen_string_literal: true
 
 require "resource"
+require "bottle"
+require "github_packages"
 require "livecheck"
 
 RSpec.describe Resource do
@@ -103,12 +105,6 @@ RSpec.describe Resource do
       resource.url("https://brew.sh/foo-1.0.tar.gz", tag: "v1.0.2")
       expect(resource.version).to eq(Version.parse("1.0.2"))
       expect(resource.version).to be_detected_from_url
-    end
-
-    it "rejects non-string versions" do
-      expect { resource.version(1) }.to raise_error(TypeError)
-      expect { resource.version(2.0) }.to raise_error(TypeError)
-      expect { resource.version(Object.new) }.to raise_error(TypeError)
     end
 
     it "returns nil if unset" do
@@ -263,6 +259,63 @@ RSpec.describe Resource do
     end
   end
 
+  describe Resource::BottleManifest do
+    describe "#sbom_supplement" do
+      it "returns the current platform supplement from an all bottle manifest" do
+        bottle_resource = Resource.new("testball")
+        bottle_resource.version("1.0")
+        bottle_resource.sha256(TEST_SHA256)
+
+        bottle = instance_double(
+          Bottle,
+          name:     "testball",
+          rebuild:  0,
+          resource: bottle_resource,
+          tag:      Utils::Bottles.tag(:all),
+        )
+        manifest = described_class.new(bottle)
+
+        current_tag_supplement = { "packages" => [{ "SPDXID" => "SPDXRef-current" }] }
+        manifest_json = {
+          "manifests" => [
+            {
+              "annotations" => {
+                "org.opencontainers.image.ref.name" => "1.0.all",
+                "sh.brew.bottle.digest"             => TEST_SHA256,
+                "sh.brew.sbom.supplement"           => {
+                  "tags" => {
+                    Utils::Bottles.tag.to_s => current_tag_supplement,
+                    "other"                 => { "packages" => [{ "SPDXID" => "SPDXRef-other" }] },
+                  },
+                }.to_json,
+              },
+            },
+          ],
+        }
+        cached_download = mktmpdir/"manifest.json"
+        cached_download.write(JSON.generate(manifest_json))
+        allow(manifest).to receive(:cached_download).and_return(cached_download)
+
+        expect(manifest.sbom_supplement).to eq(current_tag_supplement)
+      end
+    end
+  end
+
+  specify "#verify_download_integrity skips files already verified in this process" do
+    fn = mktmpdir/"test.tar.gz"
+    fn.write "content"
+    digest = Digest::SHA256.hexdigest("content")
+    resource.sha256(digest)
+
+    other_resource = described_class.new("other")
+    other_resource.sha256(digest)
+
+    expect(fn).to receive(:verify_checksum).once.and_call_original
+
+    resource.verify_download_integrity(fn)
+    other_resource.verify_download_integrity(fn)
+  end
+
   specify "#verify_download_integrity_missing" do
     fn = Pathname.new("test")
 
@@ -274,7 +327,8 @@ RSpec.describe Resource do
   end
 
   specify "#verify_download_integrity_mismatch" do
-    fn = instance_double(Pathname, file?: true, basename: "foo")
+    fn = Pathname.new("foo")
+    allow(fn).to receive(:file?).and_return(true)
     checksum = resource.sha256(TEST_SHA256)
 
     expect(fn).to receive(:verify_checksum)

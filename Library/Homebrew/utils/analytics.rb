@@ -15,15 +15,13 @@ module Utils
     INFLUX_HOST = "https://eu-central-1-1.aws.cloud2.influxdata.com"
     INFLUX_ORG = "d81a3e6d582d485f"
     WSL_SUFFIX = " [WSL]"
+    ENV_CONFIG_COMMANDS = %w[config fetch install reinstall update update-report upgrade].freeze
 
     extend Utils::Output::Mixin
     extend T::Generic
     extend Cachable
 
-    # Sorbet type members are mutable by design and cannot be frozen.
-    # rubocop:disable Style/MutableConstant
     Cache = type_template { { fixed: T::Hash[Symbol, T.untyped] } }
-    # rubocop:enable Style/MutableConstant
 
     class << self
       include Context
@@ -37,7 +35,7 @@ module Utils
         return if not_this_run? || disabled?
 
         # Tags are always implicitly strings and must have low cardinality.
-        tags_string = tags.map { |k, v| "#{k}=#{v}" }
+        tags_string = tags.map { |k, v| "#{k}=#{v.to_s.gsub(/[ ,=]/) { |char| "\\#{char}" }}" }
                           .join(",")
 
         # Fields need explicitly wrapped with quotes and can have high cardinality.
@@ -68,7 +66,7 @@ module Utils
           puts "#{curl} #{args.join(" ")} \"#{url}\""
           puts Utils.popen_read(curl, *args, url)
         else
-          pid = spawn curl, *args, url
+          pid = spawn curl, *args, url, out: File::NULL, err: File::NULL
           Process.detach(pid)
         end
       end
@@ -131,6 +129,16 @@ module Utils
           devcmdrun: Homebrew::EnvConfig.devcmdrun?,
           developer: Homebrew::EnvConfig.developer?,
         }
+        if ENV_CONFIG_COMMANDS.include?(command)
+          variables = Homebrew::EnvConfig::ANALYTICS_VARIABLES
+          env_config = variables.fetch(Random.rand(variables.length))
+          tags[:env_config] = env_config.to_s
+          tags[:env_config_state] = if Homebrew::EnvConfig.user_set_variable?(env_config)
+            Homebrew::EnvConfig.non_default_variable?(env_config) ? "non_default" : "default"
+          else
+            "unset"
+          end
+        end
 
         # Fields can have high cardinality.
         fields = { options: }
@@ -338,7 +346,7 @@ module Utils
 
         require "api"
 
-        return unless Homebrew::API.formula_names.include? formula.name
+        return unless Homebrew::API.formula_name? formula.name
 
         json = Homebrew::API::Formula.formula_json formula.name
         return if json.blank? || json["analytics"].blank?
@@ -356,7 +364,7 @@ module Utils
 
         require "api"
 
-        return unless Homebrew::API.cask_tokens.include? cask.token
+        return unless Homebrew::API.cask_token?(cask.token)
 
         json = Homebrew::API::Cask.cask_json cask.token
         return if json.blank? || json["analytics"].blank?

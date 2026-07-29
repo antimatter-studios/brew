@@ -18,7 +18,7 @@ module Homebrew
             `brew bundle exec` [`--check`] [`--no-secrets`] [`--sandbox=`<path>] [`--deny-network`] <command>:
             Run an external command in an isolated build environment based on the `Brewfile` dependencies.
 
-            This sanitized build environment ignores unrequested dependencies, which makes sure that things you didn't specify in your `Brewfile` won't get picked up by commands like `bundle install`, `npm install`, etc. It will also add compiler flags which will help with finding keg-only dependencies like `openssl`, `icu4c`, etc.
+            This sanitised build environment ignores unrequested dependencies, which makes sure that things you didn't specify in your `Brewfile` won't get picked up by commands like `bundle install`, `npm install`, etc. It will also add compiler flags which will help with finding keg-only dependencies like `openssl`, `icu4c`, etc.
           EOS
           named_args :command
           switch "--install",
@@ -169,7 +169,7 @@ module Homebrew
 
           # For commands which aren't either absolute or relative
           # Add the command directory to PATH, since it may get blown away by superenv
-          if command.exclude?("/") && (which_command = which(command)).present?
+          if command.exclude?("/") && (which_command = which(command))
             ENV.prepend_path "PATH", which_command.dirname.to_s
           end
 

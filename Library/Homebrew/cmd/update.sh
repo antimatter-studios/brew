@@ -665,7 +665,7 @@ EOS
   then
     safe_cd "${HOMEBREW_REPOSITORY}"
     echo "HOMEBREW_BREW_GIT_REMOTE set: using ${HOMEBREW_BREW_GIT_REMOTE} as the Homebrew/brew Git remote."
-    git remote set-url origin "${HOMEBREW_BREW_GIT_REMOTE}"
+    git remote set-url origin --end-of-options "${HOMEBREW_BREW_GIT_REMOTE}"
     git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
     git fetch --force --tags origin
     SKIP_FETCH_BREW_REPOSITORY=1
@@ -676,7 +676,7 @@ EOS
   then
     safe_cd "${HOMEBREW_CORE_REPOSITORY}"
     echo "HOMEBREW_CORE_GIT_REMOTE set: using ${HOMEBREW_CORE_GIT_REMOTE} as the Homebrew/homebrew-core Git remote."
-    git remote set-url origin "${HOMEBREW_CORE_GIT_REMOTE}"
+    git remote set-url origin --end-of-options "${HOMEBREW_CORE_GIT_REMOTE}"
     git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
     git config fetch.prune true
     git fetch --force origin
@@ -1048,11 +1048,13 @@ EOS
     rm -f "${HOMEBREW_CACHE}"/api/internal/formula.*.jws.json
     rm -f "${HOMEBREW_CACHE}"/api/internal/cask.*.jws.json
 
-    # Remove API files from previous OS versions.
-    for f in "${HOMEBREW_CACHE}"/api/internal/packages.*.jws.json
+    # Remove API files (and their `.payload` sidecars) from previous OS
+    # versions. Keep in sync with `cache_files` in Library/Homebrew/cleanup.rb.
+    for f in "${HOMEBREW_CACHE}"/api/internal/packages.*.jws.json*
     do
       case "${f}" in
         "${HOMEBREW_CACHE}/api/internal/packages.$(bottle_tag).jws.json") ;;
+        "${HOMEBREW_CACHE}/api/internal/packages.$(bottle_tag).jws.json.payload") ;;
         *) rm -f "${f}" ;;
       esac
     done

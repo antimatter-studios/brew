@@ -57,9 +57,9 @@ module Homebrew
                description: "Fetch GitHub Packages manifest for extra information when <formula> is not installed.",
                odeprecated: true
         flag   "--json",
-               description: "Print a JSON representation. Currently the default value for <version> is `v1` for " \
-                            "<formula>. For <formula> and <cask> use `v2`. See the docs for examples of using the " \
-                            "JSON output: <https://docs.brew.sh/Querying-Brew>"
+               description: "Print a JSON representation. Currently the default value for <version> is `v1`." \
+                            "`v1` is valid for <formula> only. `v2` is valid for both <formula> and <cask>." \
+                            "See the docs for examples of using the JSON output: <https://docs.brew.sh/Querying-Brew>"
         switch "--installed",
                description: "Output a human-readable inventory of installed formulae and casks. If `--json` is " \
                             "passed, print JSON for installed formulae and, with `--json=v2`, installed casks."
@@ -174,20 +174,6 @@ module Homebrew
         end
       end
 
-      sig { params(formula_or_cask: T.any(Formula, Cask::Cask)).returns(T::Array[String]) }
-      def self.requirements_lines(formula_or_cask)
-        return [] unless $stdout.tty?
-
-        case formula_or_cask
-        when Formula
-          []
-        when Cask::Cask
-          cask_requirements_lines(formula_or_cask)
-        else
-          T.absurd(formula_or_cask)
-        end
-      end
-
       sig { params(tab: T.any(Tab, Cask::Tab)).returns(String) }
       def self.installation_status(tab)
         # TODO: Deprecate reading `installed_as_dependency`; `installed_on_request`
@@ -267,27 +253,6 @@ module Homebrew
         metadata
       end
 
-      sig { params(cask: Cask::Cask).returns(T::Array[String]) }
-      def self.cask_requirements_lines(cask)
-        macos_requirements = [cask.depends_on.macos, cask.depends_on.maximum_macos].compact
-        requirement = if macos_requirements.present?
-          requirement = macos_requirements.filter_map do |macos_requirement|
-            macos_requirement.display_s.delete_suffix(" (or Linux)").delete_prefix("macOS").strip.presence
-          end
-          requirement = requirement.present? ? "macOS #{requirement.join(", ")}" : "macOS"
-          requirement += " or Linux" if cask.supports_linux?
-          requirement
-        elsif cask.supports_macos? && cask.supports_linux?
-          "macOS or Linux"
-        elsif cask.supports_macos?
-          "macOS"
-        elsif cask.supports_linux?
-          "Linux"
-        end
-
-        requirement ? [requirement] : []
-      end
-
       sig { params(time: T.any(Integer, Time)).returns(String) }
       def self.formatted_time(time)
         time = Time.at(time) if time.is_a?(Integer)
@@ -347,40 +312,7 @@ module Homebrew
       end
 
       private_class_method :formula_metadata_lines, :formatted_time, :pin_path_mtime,
-                           :formula_installs_from_source?, :cask_requirements_lines
-
-      private
-
-      sig { void }
-      def print_statistics
-        return unless HOMEBREW_CELLAR.exist?
-
-        count = Formula.racks.length
-        puts "#{Utils.pluralize("keg", count, include_count: true)}, #{HOMEBREW_CELLAR.dup.abv}"
-      end
-
-      sig { void }
-      def print_analytics
-        if args.no_named?
-          Utils::Analytics.output(args:)
-          return
-        end
-
-        args.named.to_formulae_and_casks_and_unavailable.each_with_index do |obj, i|
-          puts unless i.zero?
-
-          case obj
-          when Formula
-            Utils::Analytics.formula_output(obj, args:) if obj.core_formula?
-          when Cask::Cask
-            Utils::Analytics.cask_output(obj, args:) if obj.tap&.core_cask_tap?
-          when FormulaOrCaskUnavailableError
-            Utils::Analytics.output(filter: obj.name, args:)
-          else
-            raise
-          end
-        end
-      end
+                           :formula_installs_from_source?
 
       sig { params(quiet: T::Boolean).void }
       def print_info(quiet: false)
@@ -411,25 +343,6 @@ module Homebrew
         end
       end
 
-      sig {
-        params(resolved: T::Array[[T.untyped, T.nilable(Tap)]]).returns(T::Array[[T.untyped, T.nilable(Tap)]])
-      }
-      def unique_by_display_name(resolved)
-        resolved.uniq do |obj, _shadowed_by|
-          case obj
-          when Formula, Cask::Cask then obj.full_name
-          else obj
-          end
-        end
-      end
-
-      sig { params(formula: Formula, user_qualified: T::Boolean).returns([Formula, T.nilable(Tap)]) }
-      def display_resolution(formula, user_qualified:)
-        return [formula, nil] if user_qualified
-
-        installed_resolution(formula)
-      end
-
       sig { params(formula_or_cask: T.any(Formula, Cask::Cask), qualified_inputs: T::Set[String]).returns(T::Boolean) }
       def formula_qualified_by_user?(formula_or_cask, qualified_inputs)
         return false if qualified_inputs.empty?
@@ -439,24 +352,6 @@ module Homebrew
           names << "#{tap.name.downcase}/#{Utils.name_or_token(formula_or_cask).downcase}"
         end
         names.any? { |n| qualified_inputs.include?(n) }
-      end
-
-      sig { params(formula_or_cask: T.any(Formula, Cask::Cask), quiet: T::Boolean, shadowed_by: T.nilable(Tap)).void }
-      def info_formula_or_cask(formula_or_cask, quiet:, shadowed_by: nil)
-        case formula_or_cask
-        when Formula
-          if quiet
-            info_formula_summary(formula_or_cask)
-          else
-            info_formula(formula_or_cask, shadowed_by:)
-          end
-        when Cask::Cask
-          if quiet
-            info_cask_summary(formula_or_cask)
-          else
-            info_cask(formula_or_cask)
-          end
-        end
       end
 
       sig { params(formula: Formula).returns([Formula, T.nilable(Tap)]) }
@@ -470,95 +365,6 @@ module Homebrew
         [Formulary.factory("#{installed_tap}/#{keg.name}"), formula.tap]
       rescue FormulaUnavailableError, TapFormulaAmbiguityError
         [formula, nil]
-      end
-
-      sig { params(formula: Formula).returns(T.nilable(Formula)) }
-      def shadowing_installed_formula(formula)
-        installed_formula, shadowed_by = installed_resolution(formula)
-        installed_formula if shadowed_by
-      end
-
-      sig { params(formula: Formula, qualified_inputs: T::Set[String]).returns(Formula) }
-      def swap_to_installed_formula(formula, qualified_inputs)
-        return formula if formula_qualified_by_user?(formula, qualified_inputs)
-
-        installed_resolution(formula).first
-      end
-
-      sig { params(version: T.any(T::Boolean, String)).returns(Symbol) }
-      def json_version(version)
-        version_hash = {
-          true => :default,
-          "v1" => :v1,
-          "v2" => :v2,
-        }
-
-        raise UsageError, "invalid JSON version: #{version}" unless version_hash.include?(version)
-
-        version_hash[version]
-      end
-
-      sig { params(json: T.any(T::Boolean, String), eval_all: T::Boolean).void }
-      def print_json(json, eval_all)
-        raise FormulaOrCaskUnspecifiedError if !(eval_all || args.installed?) && args.no_named?
-
-        qualified_inputs = args.named.select { |name| name.include?("/") }.to_set
-
-        json = case json_version(json)
-        when :v1, :default
-          raise UsageError, "Cannot specify `--cask` when using `--json=v1`!" if args.cask?
-
-          formulae = if eval_all
-            Formula.all(eval_all:).sort
-          elsif args.installed?
-            Formula.installed.sort
-          else
-            args.named.to_formulae.map { |f| swap_to_installed_formula(f, qualified_inputs) }
-          end
-
-          if args.variations?
-            formulae.map(&:to_hash_with_variations)
-          else
-            formulae.map(&:to_hash)
-          end
-        when :v2
-          formulae, casks = T.let(
-            if eval_all
-              formulae = [] if args.cask?
-              formulae ||= Formula.all(eval_all:).sort
-              casks = [] if args.formula?
-              casks ||= Cask::Cask.all(eval_all:).sort_by(&:full_name)
-              [formulae, casks]
-            elsif args.installed?
-              formulae = [] if args.cask?
-              formulae ||= Formula.installed.sort
-              casks = [] if args.formula?
-              casks ||= Cask::Caskroom.casks.sort_by(&:full_name)
-              [formulae, casks]
-            else
-              named_formulae, named_casks = T.cast(
-                args.named.to_formulae_to_casks, [T::Array[Formula], T::Array[Cask::Cask]]
-              )
-              [named_formulae.map { |f| swap_to_installed_formula(f, qualified_inputs) }, named_casks]
-            end, [T::Array[Formula], T::Array[Cask::Cask]]
-          )
-
-          if args.variations?
-            {
-              "formulae" => formulae.map(&:to_hash_with_variations),
-              "casks"    => casks.map(&:to_hash_with_variations),
-            }
-          else
-            {
-              "formulae" => formulae.map(&:to_hash),
-              "casks"    => casks.map(&:to_h),
-            }
-          end
-        else
-          raise
-        end
-
-        puts JSON.pretty_generate(json)
       end
 
       sig { params(formula_or_cask: T.any(Formula, Cask::Cask)).returns(String) }
@@ -581,7 +387,7 @@ module Homebrew
           return cask.sourcefile_path.to_s if tap.blank? || tap.remote.blank?
 
           sourcefile_path = cask.sourcefile_path
-          if sourcefile_path.blank? || sourcefile_path.extname != ".rb"
+          if !sourcefile_path || sourcefile_path.extname != ".rb"
             return "#{tap.default_remote}/blob/HEAD/#{tap.relative_cask_path(cask.token)}"
           end
 
@@ -592,13 +398,6 @@ module Homebrew
         raise "unexpected nil tap.remote" unless remote
 
         github_remote_path(remote, path.to_s)
-      end
-
-      sig { params(name: String, description: T.nilable(String), installed: T::Boolean).returns(String) }
-      def info_summary_title(name, description, installed:)
-        name = pretty_installed(name) if installed
-
-        "#{name}#{": #{description}" if description.present?}"
       end
 
       sig { params(formula: Formula).void }
@@ -664,6 +463,7 @@ module Homebrew
           outdated:,
           deprecated: formula.deprecated?,
           disabled:   formula.disabled?,
+          bold:       true,
         )
 
         puts "#{oh1_title(name_with_status)}: #{specs * ", "}#{" [#{attrs * ", "}]" unless attrs.empty?}"
@@ -735,7 +535,7 @@ module Homebrew
 
         installed_lines = installed_section_lines(shadowing_formula || formula, verbose: args.verbose?)
         unless installed_lines.empty?
-          ohai "Installed Kegs and Versions"
+          ohai(args.verbose? ? "Installed Kegs and Versions" : "Installed Versions")
           installed_lines.each { |line| puts line }
         end
 
@@ -829,6 +629,172 @@ module Homebrew
         Utils::Analytics.formula_output(formula, args:)
       end
 
+      private
+
+      sig { void }
+      def print_statistics
+        return unless HOMEBREW_CELLAR.exist?
+
+        count = Formula.racks.length
+        puts "#{Utils.pluralize("keg", count, include_count: true)}, #{HOMEBREW_CELLAR.dup.abv}"
+      end
+
+      sig { void }
+      def print_analytics
+        if args.no_named?
+          Utils::Analytics.output(args:)
+          return
+        end
+
+        args.named.to_formulae_and_casks_and_unavailable.each_with_index do |obj, i|
+          puts unless i.zero?
+
+          case obj
+          when Formula
+            Utils::Analytics.formula_output(obj, args:) if obj.core_formula?
+          when Cask::Cask
+            Utils::Analytics.cask_output(obj, args:) if obj.tap&.core_cask_tap?
+          when FormulaOrCaskUnavailableError
+            Utils::Analytics.output(filter: obj.name, args:)
+          else
+            raise
+          end
+        end
+      end
+
+      sig {
+        params(resolved: T::Array[[T.untyped, T.nilable(Tap)]]).returns(T::Array[[T.untyped, T.nilable(Tap)]])
+      }
+      def unique_by_display_name(resolved)
+        resolved.uniq do |obj, _shadowed_by|
+          case obj
+          when Formula, Cask::Cask then obj.full_name
+          else obj
+          end
+        end
+      end
+
+      sig { params(formula: Formula, user_qualified: T::Boolean).returns([Formula, T.nilable(Tap)]) }
+      def display_resolution(formula, user_qualified:)
+        return [formula, nil] if user_qualified
+
+        installed_resolution(formula)
+      end
+
+      sig { params(formula_or_cask: T.any(Formula, Cask::Cask), quiet: T::Boolean, shadowed_by: T.nilable(Tap)).void }
+      def info_formula_or_cask(formula_or_cask, quiet:, shadowed_by: nil)
+        case formula_or_cask
+        when Formula
+          if quiet
+            info_formula_summary(formula_or_cask)
+          else
+            info_formula(formula_or_cask, shadowed_by:)
+          end
+        when Cask::Cask
+          if quiet
+            info_cask_summary(formula_or_cask)
+          else
+            info_cask(formula_or_cask)
+          end
+        end
+      end
+
+      sig { params(formula: Formula).returns(T.nilable(Formula)) }
+      def shadowing_installed_formula(formula)
+        installed_formula, shadowed_by = installed_resolution(formula)
+        installed_formula if shadowed_by
+      end
+
+      sig { params(formula: Formula, qualified_inputs: T::Set[String]).returns(Formula) }
+      def swap_to_installed_formula(formula, qualified_inputs)
+        return formula if formula_qualified_by_user?(formula, qualified_inputs)
+
+        installed_resolution(formula).first
+      end
+
+      sig { params(version: T.any(T::Boolean, String)).returns(Symbol) }
+      def json_version(version)
+        version_hash = {
+          true => :default,
+          "v1" => :v1,
+          "v2" => :v2,
+        }
+
+        raise UsageError, "invalid JSON version: #{version}" unless version_hash.include?(version)
+
+        version_hash[version]
+      end
+
+      sig { params(json: T.any(T::Boolean, String), eval_all: T::Boolean).void }
+      def print_json(json, eval_all)
+        raise FormulaOrCaskUnspecifiedError if !(eval_all || args.installed?) && args.no_named?
+
+        qualified_inputs = args.named.select { |name| name.include?("/") }.to_set
+
+        json = case json_version(json)
+        when :v1, :default
+          raise UsageError, "Cannot specify `--cask` when using `--json=v1`!" if args.cask?
+
+          formulae = if eval_all
+            Formula.all(eval_all:).sort
+          elsif args.installed?
+            Formula.installed.sort
+          else
+            args.named.to_formulae.map { |f| swap_to_installed_formula(f, qualified_inputs) }
+          end
+
+          if args.variations?
+            formulae.map(&:to_hash_with_variations)
+          else
+            formulae.map(&:to_hash)
+          end
+        when :v2
+          formulae, casks = T.let(
+            if eval_all
+              formulae = [] if args.cask?
+              formulae ||= Formula.all(eval_all:).sort
+              casks = [] if args.formula?
+              casks ||= Cask::Cask.all(eval_all:).sort_by(&:full_name)
+              [formulae, casks]
+            elsif args.installed?
+              formulae = [] if args.cask?
+              formulae ||= Formula.installed.sort
+              casks = [] if args.formula?
+              casks ||= Cask::Caskroom.casks.sort_by(&:full_name)
+              [formulae, casks]
+            else
+              named_formulae, named_casks = T.cast(
+                args.named.to_formulae_to_casks, [T::Array[Formula], T::Array[Cask::Cask]]
+              )
+              [named_formulae.map { |f| swap_to_installed_formula(f, qualified_inputs) }, named_casks]
+            end, [T::Array[Formula], T::Array[Cask::Cask]]
+          )
+
+          if args.variations?
+            {
+              "formulae" => formulae.map(&:to_hash_with_variations),
+              "casks"    => casks.map(&:to_hash_with_variations),
+            }
+          else
+            {
+              "formulae" => formulae.map(&:to_hash),
+              "casks"    => casks.map(&:to_h),
+            }
+          end
+        else
+          raise
+        end
+
+        puts JSON.pretty_generate(json)
+      end
+
+      sig { params(name: String, description: T.nilable(String), installed: T::Boolean).returns(String) }
+      def info_summary_title(name, description, installed:)
+        name = pretty_installed(name) if installed
+
+        "#{name}#{": #{description}" if description.present?}"
+      end
+
       sig { params(formula: Formula, verbose: T::Boolean).returns(T::Array[String]) }
       def installed_section_lines(formula, verbose: false)
         siblings = formula.versioned_formulae
@@ -855,6 +821,7 @@ module Homebrew
           ]
           ordered_kegs.each_with_index.map { |keg, index| [other, keg, index.zero?] }
         end
+        with_kegs = with_kegs.select { |_other, keg, newest| newest || keg.linked? } unless verbose
         rows = with_kegs.map do |other, keg, newest|
           name_status = pretty_install_status(other.full_name, installed: true, outdated: other.outdated?)
           version = keg.version.to_s
@@ -902,7 +869,7 @@ module Homebrew
           installed ||= formula.any_version_installed? if !installed && formula
           outdated = T.let(installed && formula&.outdated? == true, T::Boolean)
           warning = missing_library_deps.include?(Utils.name_from_full_name(dep.name))
-          pretty_install_status(display, warning:, installed:, outdated:, mark_uninstalled:)
+          pretty_install_status(display, warning:, installed:, outdated:, mark_uninstalled:, bold: true)
         end.join(", ")
       end
 
@@ -910,7 +877,7 @@ module Homebrew
       def decorate_requirements(requirements, mark_uninstalled: true)
         req_status = requirements.map do |req|
           req_s = req.display_s
-          pretty_install_status(req_s, installed: req.satisfied?, mark_uninstalled:)
+          pretty_install_status(req_s, installed: req.satisfied?, mark_uninstalled:, bold: true)
         end
         req_status.join(", ")
       end

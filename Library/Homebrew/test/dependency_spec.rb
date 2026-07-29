@@ -26,11 +26,6 @@ RSpec.describe Dependency do
       dep = described_class.new("foo", [:build, "bar"])
       expect(dep.tags).to eq([:build, "bar"])
     end
-
-    it "rejects nil names" do
-      # Intentionally using T.unsafe to check runtime behaviour rather than static analysis
-      expect { T.unsafe(described_class).new(nil) }.to raise_error(TypeError)
-    end
   end
 
   describe "::merge_repeats" do
@@ -96,6 +91,11 @@ RSpec.describe Dependency do
     foo3 = described_class.new("foo", [:build])
     expect(foo1).not_to eq(foo3)
     expect(foo1).not_to eql(foo3)
+
+    uses_from_macos_ventura = UsesFromMacOSDependency.new("foo", [], bounds: { since: :ventura })
+    uses_from_macos_sonoma = UsesFromMacOSDependency.new("foo", [], bounds: { since: :sonoma })
+    expect(uses_from_macos_ventura).not_to eq(uses_from_macos_sonoma)
+    expect(uses_from_macos_ventura).not_to eql(uses_from_macos_sonoma)
   end
 
   describe "#tap" do

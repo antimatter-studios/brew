@@ -8,18 +8,18 @@ module RuboCop
     # level so each file is parsed at most once per RuboCop invocation.
     module ApiAnnotationHelper
       # Taps that enforce stricter public API rules.
-      OFFICIAL_TAPS = T.let(%w[
+      OFFICIAL_TAPS = %w[
         homebrew-core
         homebrew-cask
-      ].freeze, T::Array[String])
+      ].freeze
 
       # Source files whose `@api` annotations define the public API surface.
-      API_SOURCE_FILES = T.let(%w[
+      API_SOURCE_FILES = %w[
         formula.rb
         cask/cask.rb
         cask/dsl.rb
         utils/path.rb
-      ].freeze, T::Array[String])
+      ].freeze
 
       # Methods documented in docs/Formula-Cookbook.md mapped to their
       # defining source files (relative to Library/Homebrew/).
@@ -119,6 +119,35 @@ module RuboCop
         "version"              => "cask/dsl.rb",
         "zap"                  => "cask/dsl.rb",
       }.freeze, T::Hash[String, String])
+
+      # Methods listed in the "Service block methods" table of
+      # docs/Formula-Cookbook.md. All live in `service.rb`.
+      # Validated by `Homebrew/PublicApiCookbook` against that table and against
+      # the `@api public` annotations in `service.rb` (a 1:1 correspondence).
+      SERVICE_COOKBOOK_METHODS = T.let(%w[
+        cron
+        environment_variables
+        error_log_path
+        input_path
+        interval
+        keep_alive
+        launch_only_once
+        log_path
+        macos_legacy_timers
+        name
+        nice
+        process_type
+        require_root
+        restart_delay
+        root_dir
+        run
+        run_at_load
+        run_type
+        sockets
+        stop_timeout
+        throttle_interval
+        working_dir
+      ].to_set.freeze, T::Set[String])
 
       # Returns the set of method names annotated with a given `@api` level
       # (e.g. `"internal"`, `"private"`, `"public"`) in the given Ruby source file.

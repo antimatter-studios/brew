@@ -153,6 +153,58 @@ RSpec.describe Cask::DSL, :cask, :no_api do
         end
       end
     end
+
+    context "with checksums for only one OS" do
+      it "has no checksum on macOS when only Linux checksums are set" do
+        Homebrew::SimulateSystem.with(os: :macos, arch: :arm) do
+          cask = Cask::Cask.new("checksum-cask") do
+            sha256 x86_64_linux: "imasha2intellinux", arm64_linux: "imasha2armlinux"
+          end
+
+          expect(cask.sha256).to be_nil
+        end
+      end
+
+      it "stores the matching checksum on Linux" do
+        Homebrew::SimulateSystem.with(os: :linux, arch: :intel) do
+          cask = Cask::Cask.new("checksum-cask") do
+            sha256 x86_64_linux: "imasha2intellinux", arm64_linux: "imasha2armlinux"
+          end
+
+          expect(cask.sha256).to eq("imasha2intellinux")
+        end
+      end
+
+      it "has no checksum on Linux when only macOS checksums are set" do
+        Homebrew::SimulateSystem.with(os: :linux, arch: :arm) do
+          cask = Cask::Cask.new("checksum-cask") do
+            sha256 arm: "imasha2arm", intel: "imasha2intel"
+          end
+
+          expect(cask.sha256).to be_nil
+        end
+      end
+
+      it "raises when the running-architecture macOS checksum is missing" do
+        Homebrew::SimulateSystem.with(os: :macos, arch: :intel) do
+          expect do
+            Cask::Cask.new("checksum-cask") do
+              sha256 arm: "imasha2arm", arm64_linux: "imasha2armlinux"
+            end
+          end.to raise_error(Cask::CaskInvalidError, /invalid 'sha256' value/)
+        end
+      end
+
+      it "raises when the running-architecture Linux checksum is missing" do
+        Homebrew::SimulateSystem.with(os: :linux, arch: :intel) do
+          expect do
+            Cask::Cask.new("checksum-cask") do
+              sha256 arm64_linux: "imasha2armlinux", intel: "imasha2intel"
+            end
+          end.to raise_error(Cask::CaskInvalidError, /invalid 'sha256' value/)
+        end
+      end
+    end
   end
 
   describe "no_autobump! stanze" do
@@ -358,6 +410,14 @@ RSpec.describe Cask::DSL, :cask, :no_api do
     it "prevents defining multiple urls" do
       expect { cask }.to raise_error(Cask::CaskInvalidError, /'url' stanza may only appear once/)
     end
+
+    it "allows the `verified` parameter as a no-op" do
+      cask = Cask::Cask.new("cask-with-verified-url") do
+        url "https://brew.sh/test.zip", verified: "brew.sh"
+      end
+
+      expect(cask.url.specs).not_to have_key(:verified)
+    end
   end
 
   describe "homepage stanza" do
@@ -365,6 +425,22 @@ RSpec.describe Cask::DSL, :cask, :no_api do
 
     it "prevents defining multiple homepages" do
       expect { cask }.to raise_error(Cask::CaskInvalidError, /'homepage' stanza may only appear once/)
+    end
+
+    it "records when a human browsed the homepage" do
+      cask = Cask::Cask.new("cask-with-browsed-homepage") do
+        homepage "https://brew.sh/", browsed: "2026-07-26"
+      end
+
+      expect(cask.homepage_browsed).to eq(Date.new(2026, 7, 26))
+    end
+
+    it "requires a homepage URL when a human browser check is specified" do
+      expect do
+        Cask::Cask.new("cask-without-homepage") do
+          homepage browsed: "2026-07-26"
+        end
+      end.to raise_error(Cask::CaskInvalidError, /`browsed` requires a homepage URL/)
     end
   end
 
@@ -588,6 +664,57 @@ RSpec.describe Cask::DSL, :cask, :no_api do
 
       expect(with_conflicts_with).not_to be_installed
     end
+
+    it "ignores an uninstalled conflicting cask from an untrusted tap", :trust_store do
+      tap = Tap.fetch("thirdparty", "foo")
+      cask_file = tap.cask_dir/"conflicting-cask.rb"
+      cask_file.dirname.mkpath
+      cask_file.write <<~RUBY
+        cask "conflicting-cask" do
+          version "1.0"
+        end
+      RUBY
+
+      cask = Cask::Cask.new("requested-cask", tap:) do
+        version "1.0"
+        conflicts_with cask: "#{tap}/conflicting-cask"
+      end
+      Homebrew::Trust.trust!(:cask, "#{tap}/requested-cask")
+
+      with_env(HOMEBREW_REQUIRE_TAP_TRUST: "1") do
+        expect { Cask::Installer.new(cask).check_conflicts }.not_to raise_error
+      end
+    ensure
+      FileUtils.rm_rf HOMEBREW_TAP_DIRECTORY/"thirdparty"
+    end
+
+    it "raises for an installed conflicting cask from an untrusted tap without loading it", :trust_store do
+      tap = Tap.fetch("thirdparty", "foo")
+      cask_file = tap.cask_dir/"conflicting-cask.rb"
+      cask_file.dirname.mkpath
+      cask_file.write <<~RUBY
+        raise "untrusted tap cask evaluated"
+      RUBY
+
+      installed_cask_dir = Cask::Caskroom.path/"conflicting-cask/.metadata/1.0/20250101000000.000/Casks"
+      installed_cask_dir.mkpath
+      (installed_cask_dir/"conflicting-cask.rb").write <<~RUBY
+        raise "untrusted installed cask evaluated"
+      RUBY
+
+      cask = Cask::Cask.new("requested-cask", tap:) do
+        version "1.0"
+        conflicts_with cask: "#{tap}/conflicting-cask"
+      end
+      Homebrew::Trust.trust!(:cask, "#{tap}/requested-cask")
+
+      with_env(HOMEBREW_REQUIRE_TAP_TRUST: "1") do
+        expect { Cask::Installer.new(cask).check_conflicts }
+          .to raise_error(Cask::CaskConflictError, "Cask 'requested-cask' conflicts with 'conflicting-cask'.")
+      end
+    ensure
+      FileUtils.rm_rf HOMEBREW_TAP_DIRECTORY/"thirdparty"
+    end
   end
 
   describe "conflicts_with stanza" do
@@ -625,7 +752,7 @@ RSpec.describe Cask::DSL, :cask, :no_api do
 
       it "allows installer manual to be specified" do
         installer = cask.artifacts.first
-        expect(installer.instance_variable_get(:@manual_install)).to be true
+        expect(installer.manual_install).to be true
         expect(installer.path).to eq(Pathname("Caffeine.app"))
       end
     end

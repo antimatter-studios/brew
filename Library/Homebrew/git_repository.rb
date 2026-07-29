@@ -23,7 +23,7 @@ class GitRepository
   # Gets the URL of the Git origin remote.
   sig { returns(T.nilable(String)) }
   def origin_url
-    popen_git("config", "--local", "--get", "remote.origin.url", no_global_config: true)
+    origin_url_from_config || popen_git("config", "--local", "--get", "remote.origin.url", no_global_config: true)
   end
 
   # Gets the full commit hash of the HEAD commit.
@@ -43,6 +43,19 @@ class GitRepository
   sig { returns(T.nilable(String)) }
   def last_committed
     popen_git("show", "-s", "--format=%cr", "HEAD")
+  end
+
+  # Gets the full commit hash of the HEAD commit, the relative date of the
+  # last commit and the currently checked-out branch (or HEAD if the
+  # repository is in a detached HEAD state) in a single Git invocation.
+  sig { returns([T.nilable(String), T.nilable(String), T.nilable(String)]) }
+  def head_info
+    output = popen_git("show", "-s", "--format=%H%n%cr%n%D", "HEAD")
+    return [nil, nil, nil] if output.nil?
+
+    head, last_committed, refs = output.lines(chomp: true)
+    branch = refs&.[](/\AHEAD -> ([^,\n]+)/, 1) || "HEAD"
+    [head, last_committed, branch]
   end
 
   # Gets the name of the currently checked-out branch, or HEAD if the repository is in a detached HEAD state.
@@ -115,6 +128,44 @@ class GitRepository
   def to_s = pathname.to_s
 
   private
+
+  # Reads `remote.origin.url` straight from `.git/config` to skip spawning
+  # Git on a hot path. Returns `nil` (so the caller falls back to Git) for
+  # anything the canonical form does not cover: a worktree/submodule `.git`
+  # file, an `include`/`includeIf` directive that can define the URL
+  # elsewhere, a non-canonical section header, more than one `url` value, or a
+  # value whose comments/quoting/escapes need Git's own config parser.
+  sig { returns(T.nilable(String)) }
+  def origin_url_from_config
+    config_file = pathname/".git/config"
+    return unless config_file.file?
+
+    content = config_file.read
+    return if content.match?(/^\s*\[include(?:If)?[\s"\]]/i)
+
+    urls = content.lines
+                  .slice_before { |line| line.lstrip.start_with?("[") }
+                  .select { |section| section.fetch(0).strip == '[remote "origin"]' }
+                  .flat_map do |section|
+      section.drop(1).filter_map do |line|
+        stripped = line.strip
+        next if stripped.empty? || stripped.start_with?("#", ";")
+
+        key, separator, value = stripped.partition("=")
+        next if separator.empty? || !key.strip.casecmp?("url")
+
+        value.strip
+      end
+    end
+    return if urls.length != 1
+
+    url = urls.fetch(0)
+    return if url.empty? || url.match?(/["#;\\]/)
+
+    url
+  rescue SystemCallError
+    nil
+  end
 
   sig {
     params(args: T.untyped, safe: T::Boolean, err: T.nilable(Symbol), no_global_config: T::Boolean)

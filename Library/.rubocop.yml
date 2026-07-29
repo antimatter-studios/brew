@@ -94,6 +94,20 @@ Homebrew/NegateInclude:
     - "Homebrew/rubocops/**/*"
     - "Homebrew/sorbet/tapioca/**/*"
 
+Homebrew/NoInstanceVariableAccessInTests:
+  Description: "Use public `attr_*` accessors instead of `instance_variable_get`/`instance_variable_set` in tests."
+  Include:
+    - "Homebrew/test/**/*.rb"
+  Exclude:
+    - "Homebrew/test/support/fixtures/**/*"
+
+Homebrew/NoSendInTests:
+  Description: "Make the target method public and call it directly instead of using `send` in tests."
+  Include:
+    - "Homebrew/test/**/*.rb"
+  Exclude:
+    - "Homebrew/test/support/fixtures/**/*"
+
 Homebrew/UnreferencedLet:
   Description: "Removes a lazy `let` whose name is never referenced (its block never runs)."
   Include:
@@ -160,7 +174,6 @@ Layout/LineLength:
       '"~/Library/Caches/',
       '"~/Library/Containers',
       '"~/Application Support',
-      " was verified as official when first introduced to the cask",
     ]
 
 # conflicts with DSL-style path concatenation with `/`
@@ -332,6 +345,12 @@ Style/AndOr:
 
 # Disabled because it breaks Sorbet: "The declaration for `with` is missing parameter(s): & (RuntimeError)"
 Style/ArgumentsForwarding:
+  Enabled: false
+
+# Autocorrects `include?`/`member?` block patterns to `intersect?` even when the second operand
+# isn't actually an `Array` (e.g. `String`, `Set`, `Enumerator`), which can raise at runtime.
+# Re-enable once a rubocop version with https://github.com/rubocop/rubocop/pull/15442 is released.
+Style/ArrayIntersect:
   Enabled: false
 
 # Avoid leaking resources.

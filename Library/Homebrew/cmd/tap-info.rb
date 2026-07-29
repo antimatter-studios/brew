@@ -40,21 +40,17 @@ module Homebrew
         end
       end
 
-      private
-
       sig { params(taps: T::Array[Tap]).void }
       def print_tap_info(taps)
         if taps.none?
-          tap_count = 0
-          formula_count = 0
-          command_count = 0
-          private_count = 0
-          Tap.installed.each do |tap|
-            tap_count += 1
-            formula_count += tap.formula_files.size
-            command_count += tap.command_files.size
-            private_count += 1 if tap.private?
+          # Tap#private? queries the GitHub API for each non-core tap.
+          tap_stats = Utils.parallel_map(Tap.installed) do |tap|
+            [tap.formula_files.size, tap.command_files.size, tap.private?]
           end
+          tap_count = tap_stats.count
+          formula_count = tap_stats.sum(&:first)
+          command_count = tap_stats.sum { |_, command_files_count, _| command_files_count }
+          private_count = tap_stats.count { |_, _, private_tap| private_tap }
           info = Utils.pluralize("tap", tap_count, include_count: true)
           info += ", #{private_count} private"
           info += ", #{Utils.pluralize("formula", formula_count, include_count: true)}"
@@ -97,9 +93,6 @@ module Homebrew
         end
       end
 
-      LISTING_LIMIT = 30
-      private_constant :LISTING_LIMIT
-
       sig { params(tap: Tap).void }
       def print_tap_listings(tap)
         commands = tap.command_files
@@ -123,32 +116,6 @@ module Homebrew
         end
         print_section(tap, "Casks", cask_tokens, installed_casks, min_width:) do |token|
           decorate_cask(tap, token, installed: installed_cask_tokens.include?(token))
-        end
-      end
-
-      sig {
-        params(
-          tap:       Tap,
-          label:     String,
-          all:       T::Array[String],
-          installed: T::Array[String],
-          min_width: Integer,
-          block:     T.proc.params(name: String).returns(String),
-        ).void
-      }
-      def print_section(tap, label, all, installed, min_width:, &block)
-        return if all.none?
-
-        if all.size <= LISTING_LIMIT
-          ohai label, Formatter.columns(all.map(&block), min_width:)
-        elsif installed.any?
-          ohai label
-          opoo "Tap has more than #{LISTING_LIMIT} #{label.downcase}; showing only installed entries."
-          puts Formatter.columns(installed.map(&block), min_width:)
-        else
-          ohai label
-          opoo "Tap has more than #{LISTING_LIMIT} #{label.downcase} and none are installed."
-          puts "See: #{tap.remote}" if tap.remote.present?
         end
       end
 
@@ -184,7 +151,41 @@ module Homebrew
 
       sig { params(taps: T::Array[Tap]).void }
       def print_tap_json(taps)
-        puts JSON.pretty_generate(taps.map(&:to_hash))
+        # Tap#to_hash shells out to Git and queries the GitHub API.
+        hashes = Utils.parallel_map(taps, &:to_hash)
+
+        puts JSON.pretty_generate(hashes)
+      end
+
+      private
+
+      LISTING_LIMIT = 30
+      private_constant :LISTING_LIMIT
+
+      sig {
+        params(
+          tap:       Tap,
+          label:     String,
+          all:       T::Array[String],
+          installed: T::Array[String],
+          min_width: Integer,
+          block:     T.proc.params(name: String).returns(String),
+        ).void
+      }
+      def print_section(tap, label, all, installed, min_width:, &block)
+        return if all.none?
+
+        if all.size <= LISTING_LIMIT
+          ohai label, Formatter.columns(all.map(&block), min_width:)
+        elsif installed.any?
+          ohai label
+          opoo "Tap has more than #{LISTING_LIMIT} #{label.downcase}; showing only installed entries."
+          puts Formatter.columns(installed.map(&block), min_width:)
+        else
+          ohai label
+          opoo "Tap has more than #{LISTING_LIMIT} #{label.downcase} and none are installed."
+          puts "See: #{tap.remote}" if tap.remote.present?
+        end
       end
     end
   end

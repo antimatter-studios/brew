@@ -1,8 +1,6 @@
 # typed: strict
 # frozen_string_literal: true
 
-require "plist"
-
 require "utils/user"
 require "cask/artifact/abstract_artifact"
 require "extend/hash/keys"
@@ -28,7 +26,7 @@ module Cask
       def initialize(cask, path, **stanza_options)
         super
         @path = T.let(cask.staged_path.join(path), Pathname)
-        @stanza_options = T.let(stanza_options, T::Hash[Symbol, T.untyped])
+        @stanza_options = stanza_options
       end
 
       sig { override.returns(String) }
@@ -72,11 +70,14 @@ module Cask
         args << "-allowUntrusted" if stanza_options.fetch(:allow_untrusted, false)
         with_choices_file do |choices_path|
           args << "-applyChoiceChangesXML" << choices_path if choices_path
+
+          current_user_str = User.current&.to_s
           env = {
-            "LOGNAME"  => User.current,
-            "USER"     => User.current,
-            "USERNAME" => User.current,
+            "LOGNAME"  => current_user_str,
+            "USER"     => current_user_str,
+            "USERNAME" => current_user_str,
           }
+
           command.run!(
             "/usr/sbin/installer",
             sudo:         true,
@@ -96,6 +97,7 @@ module Cask
         choices = stanza_options.fetch(:choices, {})
         return yield nil if choices.empty?
 
+        require "plist"
         Tempfile.open(["choices", ".xml"]) do |file|
           file.write Plist::Emit.dump(choices)
           file.close

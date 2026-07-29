@@ -23,7 +23,7 @@ RSpec.describe GitHubRunnerMatrix, :no_api do
 
   before do
     allow(ENV).to receive(:fetch).and_call_original
-    allow(ENV).to receive(:fetch).with("HOMEBREW_LINUX_RUNNER").and_return("ubuntu-latest")
+    allow(ENV).to receive(:fetch).with("HOMEBREW_LINUX_SELF_HOSTED", "false").and_return("false")
     allow(ENV).to receive(:fetch).with("HOMEBREW_MACOS_LONG_TIMEOUT", "false").and_return("false")
     allow(ENV).to receive(:fetch).with("HOMEBREW_MACOS_BUILD_ON_GITHUB_RUNNER", "false").and_return("false")
     allow(ENV).to receive(:fetch).with("GITHUB_RUN_ID").and_return("12345")
@@ -49,13 +49,26 @@ RSpec.describe GitHubRunnerMatrix, :no_api do
                        .respond_to?(:to_json),
       ).to be(true)
     end
+
+    it "uses Landlock in unprivileged Linux containers" do
+      linux_containers = described_class.new([], ["deleted"], all_supported: false, dependent_matrix: false)
+                                        .active_runner_specs_hash
+                                        .filter_map { |runner| runner[:container] }
+
+      expect(linux_containers).to eq(Array.new(2) do
+        {
+          image:   "ghcr.io/homebrew/brew:main",
+          options: "--user linuxbrew --env HOMEBREW_SANDBOX_LINUX_LANDLOCK=1",
+        }
+      end)
+    end
   end
 
   describe "#generate_runners!" do
     it "is idempotent" do
       matrix = described_class.new([], [], all_supported: false, dependent_matrix: false)
       runners = matrix.runners.dup
-      matrix.send(:generate_runners!)
+      matrix.generate_runners!
 
       expect(matrix.runners).to eq(runners)
     end
@@ -99,7 +112,7 @@ RSpec.describe GitHubRunnerMatrix, :no_api do
 
           expect(runner_matrix.runners.all?(&:active)).to be(false)
           expect(runner_matrix.runners.any?(&:active)).to be(true)
-          expect(get_runner_names(runner_matrix)).to eq(["Linux x86_64", "Linux arm64"])
+          expect(get_runner_names(runner_matrix)).to eq(["Linux arm64", "Linux x86_64"])
         end
       end
 
@@ -177,6 +190,14 @@ RSpec.describe GitHubRunnerMatrix, :no_api do
           end
 
           it "splits active runners into shards" do
+            macos = GitHubRunnerMatrix::NEWEST_HOMEBREW_CORE_MACOS_RUNNER
+            macos_version = MacOSVersion.from_symbol(macos)
+            stub_const("GitHubRunnerMatrix::OLDEST_HOMEBREW_CORE_MACOS_RUNNER", macos)
+            stub_const("OS::LINUX_CI_ARM_RUNNER", "ubuntu-24.04-arm")
+
+            allow(ENV).to receive(:fetch).with("HOMEBREW_MACOS_LONG_TIMEOUT", "false").and_return("true")
+            allow(ENV).to receive(:key?).and_call_original
+            allow(ENV).to receive(:key?).with("GITHUB_ACTIONS").and_return(true)
             allow(Formula).to receive(:all).and_return([testball, testball_depender].map(&:formula))
 
             runners = described_class.new([testball], [],
@@ -188,6 +209,14 @@ RSpec.describe GitHubRunnerMatrix, :no_api do
             expect(runners).to all(include(:formulae_dependents_shard))
             expect(runners.map { |runner| runner.fetch(:formulae_dependents_shard) }.uniq).to eq(["1/2", "2/2"])
             expect(runners.map { |runner| runner.fetch(:name) }).to all(match(%r{ shard [12]/2\z}))
+            expect(runners.map { |runner| runner.fetch(:runner) }).to eq([
+              "ubuntu-24.04-arm",
+              "ubuntu-24.04-arm",
+              "ubuntu-latest",
+              "ubuntu-latest",
+              "#{macos_version}-arm64-12345-deps1-long",
+              "#{macos_version}-arm64-12345-deps2-long",
+            ])
           end
         end
 
@@ -239,14 +268,9 @@ RSpec.describe GitHubRunnerMatrix, :no_api do
           it "activates no runners" do
             testball_depender_disabled = setup_test_runner_formula("testball-depender-disabled", ["testball"])
 
-            allow(Formulary).to receive(:factory).and_call_original
-            allow(Formulary).to receive(:factory).with("testball-depender-disabled") do
-              formula = testball_depender_disabled.formula
-              allow(formula).to receive(:disabled?).and_return(true)
-              formula
-            end
-
-            allow(Formula).to receive(:all).and_return([testball, testball_depender_disabled].map(&:formula))
+            disabled_formula = testball_depender_disabled.formula
+            allow(disabled_formula).to receive(:disabled?).and_return(true)
+            allow(Formula).to receive(:all).and_return([testball.formula, disabled_formula])
 
             runner_matrix = described_class.new([testball], [], all_supported: false, dependent_matrix: true)
             expect(runner_matrix.runners.any?(&:active)).to be(false)
@@ -257,14 +281,9 @@ RSpec.describe GitHubRunnerMatrix, :no_api do
           it "activates no runners" do
             testball_depender_deprecated = setup_test_runner_formula("testball-depender-deprecated", ["testball"])
 
-            allow(Formulary).to receive(:factory).and_call_original
-            allow(Formulary).to receive(:factory).with("testball-depender-deprecated") do
-              formula = testball_depender_deprecated.formula
-              allow(formula).to receive(:deprecated?).and_return(true)
-              formula
-            end
-
-            allow(Formula).to receive(:all).and_return([testball, testball_depender_deprecated].map(&:formula))
+            deprecated_formula = testball_depender_deprecated.formula
+            allow(deprecated_formula).to receive(:deprecated?).and_return(true)
+            allow(Formula).to receive(:all).and_return([testball.formula, deprecated_formula])
 
             runner_matrix = described_class.new([testball], [], all_supported: false, dependent_matrix: true)
             expect(runner_matrix.runners.any?(&:active)).to be(false)
@@ -326,11 +345,11 @@ RSpec.describe GitHubRunnerMatrix, :no_api do
               allow(Formula).to receive(:all).and_return([testball, testball_depender_linux].map(&:formula))
 
               matrix = described_class.new([testball], ["deleted"], all_supported: false, dependent_matrix: true)
-              expect(get_runner_names(matrix)).to eq(["Linux x86_64", "Linux arm64"])
+              expect(get_runner_names(matrix)).to eq(["Linux arm64", "Linux x86_64"])
 
-              allow(ENV).to receive(:[]).with("HOMEBREW_LINUX_RUNNER").and_return("linux-self-hosted-1")
+              allow(ENV).to receive(:fetch).with("HOMEBREW_LINUX_SELF_HOSTED", "false").and_return("true")
               matrix = described_class.new([testball], ["deleted"], all_supported: false, dependent_matrix: true)
-              expect(get_runner_names(matrix)).to eq(["Linux x86_64"])
+              expect(get_runner_names(matrix)).to eq(["Linux arm64", "Linux x86_64"])
             end
           end
 
@@ -360,7 +379,7 @@ RSpec.describe GitHubRunnerMatrix, :no_api do
       dependencies.each { |dependency| depends_on dependency }
 
       kwargs.each do |k, v|
-        send(:"on_#{k}") do
+        public_send(:"on_#{k}") do
           v.each do |dep|
             depends_on dep
           end

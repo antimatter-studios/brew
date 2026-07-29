@@ -14,47 +14,97 @@ RSpec.describe Homebrew::DevCmd::Tests do
       require "extend/os/linux/dev-cmd/tests"
       require "sandbox"
 
+      allow(Homebrew::EnvConfig).to receive(:sandbox_linux?).and_return(true)
+      allow(OS::Linux::Sandbox).to receive(:landlock?).and_return(false)
       allow(GitHub::Actions).to receive(:env_set?).and_return(false)
     end
 
     it "does not require the Linux sandbox when Linux sandboxing is disabled" do
-      allow(Sandbox).to receive(:available?).and_return(false)
+      allow(Homebrew::EnvConfig).to receive(:sandbox_linux?).and_return(false)
+      allow(Sandbox).to receive_messages(available?: false, failure_reason: "sandbox unavailable")
       expect(Sandbox).not_to receive(:ensure_sandbox_installed!)
       expect(Sandbox).not_to receive(:configure!)
 
-      with_env(HOMEBREW_NO_SANDBOX_LINUX: "1") do
-        expect { tests.send(:check_test_environment!) }.not_to raise_error
-      end
+      expect { tests.check_test_environment! }.not_to raise_error
     end
 
-    it "raises when the requested Linux sandbox is unavailable" do
-      allow(Sandbox).to receive_messages(available?:     false,
-                                         failure_reason: "Bubblewrap is not working.")
-      expect(Sandbox).to receive(:ensure_sandbox_installed!).with(install_from_tests: true)
+    it "does not fail on GitHub Actions when requested Landlock is unavailable" do
+      allow(OS::Linux::Sandbox).to receive(:landlock?).and_return(true)
+      allow(Sandbox).to receive(:available?).and_return(false)
+      allow(GitHub::Actions).to receive(:env_set?).and_return(true)
+      expect(Sandbox).not_to receive(:ensure_sandbox_installed!)
+      expect(Sandbox).not_to receive(:configure!)
 
-      expect { tests.send(:check_test_environment!) }
-        .to raise_error(UsageError, "Invalid usage: Bubblewrap is not working.")
+      expect { tests.check_test_environment! }.not_to raise_error
     end
 
-    it "installs and probes sandbox availability when Linux sandboxing is enabled" do
+    it "fails outside GitHub Actions when requested Landlock is unavailable" do
+      allow(OS::Linux::Sandbox).to receive(:landlock?).and_return(true)
+      allow(Sandbox).to receive_messages(available?: false, failure_reason: "Landlock is not available.")
+      expect(Sandbox).not_to receive(:ensure_sandbox_installed!)
+      expect(Sandbox).not_to receive(:configure!)
+
+      expect { tests.check_test_environment! }
+        .to raise_error(RuntimeError, "Landlock is not available.")
+    end
+
+    it "configures requested Landlock when it is available" do
+      allow(OS::Linux::Sandbox).to receive(:landlock?).and_return(true)
+      allow(Sandbox).to receive(:available?).and_return(true)
+      expect(Sandbox).not_to receive(:ensure_sandbox_installed!)
+      expect(Sandbox).to receive(:configure!)
+
+      expect { tests.check_test_environment! }.not_to raise_error
+    end
+
+    it "installs and checks Bubblewrap outside GitHub Actions" do
       allow(Sandbox).to receive(:available?).and_return(true)
       expect(Sandbox).to receive(:ensure_sandbox_installed!).with(install_from_tests: true)
+      expect(Sandbox).not_to receive(:configure!)
 
-      expect { tests.send(:check_test_environment!) }.not_to raise_error
+      expect { tests.check_test_environment! }.not_to raise_error
     end
 
-    it "configures the sandbox on GitHub Actions when Linux sandboxing is enabled" do
+    it "configures and checks Bubblewrap on GitHub Actions" do
       allow(GitHub::Actions).to receive(:env_set?).and_return(true)
       allow(Sandbox).to receive(:available?).and_return(true)
-      expect(Sandbox).to receive(:configure!)
       expect(Sandbox).not_to receive(:ensure_sandbox_installed!)
+      expect(Sandbox).to receive(:configure!)
 
-      expect { tests.send(:check_test_environment!) }.not_to raise_error
+      expect { tests.check_test_environment! }.not_to raise_error
+    end
+  end
+
+  describe "#setup_environment!" do
+    subject(:tests) { described_class.new([]) }
+
+    before do
+      require "api"
+
+      allow(Homebrew::API).to receive(:fetch_api_files!)
+    end
+
+    it "keeps generic cache files out of the sandboxed test home" do
+      tests.setup_environment!
+
+      expect(ENV.fetch("XDG_CACHE_HOME")).to eq("#{HOMEBREW_CACHE}/tests")
+      expect(ENV.fetch("XDG_CACHE_HOME")).not_to start_with("#{Dir.home}/")
+    end
+
+    it "can disable Sorbet runtime" do
+      ENV["HOMEBREW_TESTS_NO_SORBET_RUNTIME"] = "1"
+      tests.setup_environment!
+
+      expect([
+        ENV.fetch("HOMEBREW_TESTS_NO_SORBET_RUNTIME", nil),
+        ENV.fetch("HOMEBREW_SORBET_RUNTIME", nil),
+        ENV.fetch("HOMEBREW_SORBET_RECURSIVE", nil),
+      ]).to eq(["1", nil, nil])
     end
   end
 
   describe "#changed_test_files" do
-    subject(:changed_test_files) { tests.send(:changed_test_files) }
+    subject(:changed_test_files) { tests.changed_test_files }
 
     let(:tests) { described_class.new([]) }
 
